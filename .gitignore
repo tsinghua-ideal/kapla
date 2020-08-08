@@ -1,0 +1,14 @@
+*.py[cod]
+*$py.class
+
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# Editor related.
+settings.json
+.idea
+
+# Log related.
+*.log

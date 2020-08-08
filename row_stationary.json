@@ -1,0 +1,21 @@
+{
+  "_comment": "The template for row-stationary dataflow.",
+  "REGF": {
+    "tensor_dim": {
+      "Xi": "=R",
+      "Yi": 1,
+      "R": "=R",
+      "S": 1,
+      "Xo": 1,
+      "Yo": 1
+    },
+    "stack": [
+      ["Yi", "Yo", "=Yo"],
+      ["S", "Yi", "=S"]
+    ],
+    "update": [
+      ["Xi", "Xo"]
+    ],
+    "unit_ops": "=R"
+  }
+}

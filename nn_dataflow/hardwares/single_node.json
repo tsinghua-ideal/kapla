@@ -1,0 +1,30 @@
+{
+    "word_bit": 16,
+    "op_cost": 9.984e-13,
+    "access_forwarding": true,
+    "gbuf_sharing": true,
+    "gbuf_save_writeback": true,
+    "DRAM": {
+        "size": null,
+        "access_cost": 4.0189027539954336e-10,
+        "bandwidth": 51.2,
+        "bus_width": 128
+    },
+    "GBUF": {
+        "size": 262144,
+        "array": [1, 1],
+        "access_cost": 7.483700000000001e-12,
+        "hop_cost": 9.76e-12,
+        "idle_cost": 5.410220055044509e-10,
+        "mem_type": "2D"
+    },
+    "ITCN": {
+        "access_cost": 3.2832e-12
+    },
+    "REGF": {
+        "size": 512,
+        "access_cost": 2.507285e-13,
+        "array": [16, 16]
+    }
+
+}
