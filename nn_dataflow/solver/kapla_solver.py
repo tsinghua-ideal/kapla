@@ -151,6 +151,7 @@ class KaplaSolver():
             layer_data_size[de.FIL] = layer.total_filter_size()
         layer_data_size[de.IFM] = layer.total_ifmap_size(batch_size=self.batch_size)
         layer_data_size[de.OFM] = layer.total_ofmap_size(batch_size=self.batch_size)
+        layer_data_size = tuple(layer_data_size)
 
         loopcnt, origin_regf_repls, regf_unit_tensor, gbuf_unit_tensor, regf_base_stacks, \
             regf_base_updates, origin_stack_step_dict, unit_ops = \
@@ -174,13 +175,13 @@ class KaplaSolver():
 
             # first fit as much as possible into regfile to reduce gbuf access.
             froz_remain_lcnt, froz_regf_unit_tensor, froz_regf_tensor_repl_dict = \
-                self.fill_tensor(layer_type,
-                                 conv_strds,
-                                 layer_data_size,
-                                 frozenset(remain_lcnt.items()),
-                                 frozenset(regf_unit_tensor.items()),
-                                 resource.size_regf,
-                                 bl_ords[BL.REGF])
+                self.fill_regf_tensor(layer_type,
+                    conv_strds,
+                    layer_data_size,
+                    frozenset(remain_lcnt.items()),
+                    frozenset(regf_unit_tensor.items()),
+                    frozenset(gbuf_unit_tensor.items()),
+                    tuple(bl_ords[BL.REGF]))
             if froz_remain_lcnt is None:
                 continue
 
@@ -193,7 +194,7 @@ class KaplaSolver():
             regf_base_stacks = tuple(regf_base_stacks)
             logical_dim, _, regf_rmt_shr, _ = \
                 self.cost_model.analyze_stacks(regf_froz_init_data, regf_base_stacks,
-                resource.dim_array, BL.REGF)
+                resource.dim_array, tuple(regf_base_updates), BL.REGF)
 
             base_stack_fetch = [0 for _ in range(de.NUM)]
             for dce in range(de.NUM):
@@ -222,10 +223,10 @@ class KaplaSolver():
             if not self.options.hw_gbuf_sharing:
                 # Fit into tensor.
                 froz_remain_lcnt, froz_gbuf_unit_tensor, froz_gbuf_tensor_repl_dict = \
-                        self.fill_tensor(layer_type, conv_strds, layer_data_size,
-                                         frozenset(remain_lcnt.items()),
-                                         frozenset(gbuf_unit_tensor.items()),
-                                         resource.size_gbuf, bl_ords[BL.GBUF])
+                        self.fill_gbuf_tensor(layer_type, conv_strds, layer_data_size,
+                            frozenset(remain_lcnt.items()),
+                            frozenset(gbuf_unit_tensor.items()),
+                            tuple(bl_ords[BL.GBUF]))
                 if froz_remain_lcnt is None:
                     continue
                 remain_lcnt = dict(froz_remain_lcnt)
@@ -267,10 +268,10 @@ class KaplaSolver():
 
                 # Fit into tensor.
                 froz_remain_lcnt, froz_gbuf_unit_tensor, froz_gbuf_tensor_repl_dict = \
-                    self.fill_tensor(layer_type, conv_strds, layer_data_size,
-                                     frozenset(remain_lcnt.items()),
-                                     frozenset(gbuf_unit_tensor.items()),
-                                     resource.size_gbuf, bl_ords[BL.GBUF], tuple(shr_node_num))
+                    self.fill_gbuf_tensor(layer_type, conv_strds, layer_data_size,
+                        frozenset(remain_lcnt.items()),
+                        frozenset(gbuf_unit_tensor.items()),
+                        tuple(bl_ords[BL.GBUF]), tuple(shr_node_num))
                 if froz_remain_lcnt is None:
                     continue
                 remain_lcnt = dict(froz_remain_lcnt)
@@ -495,10 +496,12 @@ class KaplaSolver():
         return loopcnt, regf_repls, regf_unit_tensor, gbuf_unit_tensor, base_stacks, base_updates, \
                origin_stack_step_dict, unit_ops
 
-    def fill_tensor(self, layer_type, conv_strds, layer_data_size, froz_lcnt, froz_tensor, buf_size,
+    @functools.lru_cache(maxsize=1024)
+    def fill_gbuf_tensor(self, layer_type, conv_strds, layer_data_size, froz_lcnt, froz_tensor,
                     bl_ord, shr_node_num=None):
         remain_lcnt = dict(froz_lcnt)
         unit_tensor = dict(froz_tensor)
+        buf_size = self.resource.size_gbuf
         # print("")
         # print("---begin to fill tensor")
         # print("remain_lcnt: {}".format(remain_lcnt))
@@ -599,6 +602,132 @@ class KaplaSolver():
                 break
 
         return frozenset(remain_lcnt.items()), frozenset(unit_tensor.items()), frozenset(tensor_repl_dict.items())
+
+    @functools.lru_cache(maxsize=1024)
+    def fill_regf_tensor(self, layer_type, conv_strds, layer_data_size, froz_lcnt, froz_rts, froz_gts,
+                    bl_ord, shr_node_num=None):
+        remain_lcnt = dict(froz_lcnt)
+        regf_tensor = dict(froz_rts)
+        gbuf_tensor = dict(froz_gts)
+        regf_buf = self.resource.size_regf
+        gbuf_buf = self.resource.size_gbuf
+        # print("")
+        # print("---begin to fill tensor")
+        # print("remain_lcnt: {}".format(remain_lcnt))
+        # print("regf_tensor: {}".format(regf_tensor))
+        # print("gbuf_tensor: {}".format(gbuf_tensor))
+        # print("regf_buf: {}".format(regf_buf))
+        # print("gbuf_buf: {}".format(gbuf_buf))
+        # print("shr_node_num: {}".format(shr_node_num))
+        if not is_valid(self.tdm, layer_type, regf_tensor, regf_buf, shr_node_num) or \
+           not is_valid(self.tdm, layer_type, gbuf_tensor, gbuf_buf, (1, 1, 1)):
+            print("Bad init unit tensor!")
+            return None, None, None
+
+        tensor_repl_dict = defaultdict(lambda: 1)
+        inm_ltype = bl_ord.index(0)
+        inm_irr_ds = self.tdm.get_ltype_irr_dtypes(layer_type, inm_ltype)
+        outer_ltypes = list(range(le.NUM))
+        outer_ltypes.pop(inm_ltype)
+        outer_irr_ds = list(range(de.NUM))
+        for inm_irr_d in inm_irr_ds:
+            outer_irr_ds.pop(inm_irr_d)
+
+        # refetch irrelevant iteration.
+        outer_refetch_size = [layer_data_size[dce] for dce in outer_irr_ds]
+        if de.OFM in outer_irr_ds:
+            outer_refetch_size[outer_irr_ds.index(de.OFM)] *= 2
+        for outer_idx, dce in enumerate(outer_irr_ds):
+            for dim in self.tdm.get_dtype_irr_dims(layer_type, dce):
+                outer_refetch_size[outer_idx] *= remain_lcnt[dim]
+
+        # Fit outer_irr lcnt into tensor.
+        outer_irr_factors = []
+        outer_irr_dims = []
+        outer_crrspd_idx = []
+        for outer_idx, dce in enumerate(outer_irr_ds):
+            for dim in self.tdm.get_dtype_irr_dims(layer_type, dce):
+                factors = [x for x, _ in util.factorize(remain_lcnt[dim], 2)]
+                # print(factors)
+                max_valid_idx = len(factors)
+                for idx, f in enumerate(factors):
+                    regf_tensor = self.tensor_mul(layer_type, conv_strds, regf_tensor, dim, f)
+                    gbuf_tensor = self.tensor_mul(layer_type, conv_strds, gbuf_tensor, dim, f)
+                    if not is_valid(self.tdm, layer_type, regf_tensor, regf_buf, shr_node_num) or \
+                       not is_valid(self.tdm, layer_type, gbuf_tensor, gbuf_buf, (1, 1, 1)):
+                        # print("Not valid")
+                        # print(unit_tensor, buf_size, shr_node_num)
+                        max_valid_idx = idx
+                        regf_tensor = self.tensor_div(layer_type, conv_strds, regf_tensor, dim, f)
+                        gbuf_tensor = self.tensor_div(layer_type, conv_strds, gbuf_tensor, dim, f)
+                        break
+                    regf_tensor = self.tensor_div(layer_type, conv_strds, regf_tensor, dim, f)
+                    gbuf_tensor = self.tensor_div(layer_type, conv_strds, gbuf_tensor, dim, f)
+                outer_irr_dims.append(dim)
+                outer_irr_factors.append(factors[:max_valid_idx])
+                outer_crrspd_idx.append(outer_idx)
+
+        # print(outer_irr_dims)
+        # print(outer_irr_factors)
+        # print(outer_crrspd_idx)
+        # print(outer_refetch_size)
+
+        best_factors = None
+        min_outer_refetch = float("inf")
+        for factors in itertools.product(*outer_irr_factors):
+            # print("factors", factors)
+            temp_outer_fetch_size = [s for s in outer_refetch_size]
+            for dim, o_idx, f in zip(outer_irr_dims, outer_crrspd_idx, factors):
+                regf_tensor = self.tensor_mul(layer_type, conv_strds, regf_tensor, dim, f)
+                gbuf_tensor = self.tensor_mul(layer_type, conv_strds, gbuf_tensor, dim, f)
+                temp_outer_fetch_size[o_idx] = util.idivc(temp_outer_fetch_size[o_idx], f)
+            if is_valid(self.tdm, layer_type, regf_tensor, regf_buf, shr_node_num) and \
+               is_valid(self.tdm, layer_type, gbuf_tensor, gbuf_buf, (1, 1, 1)):
+                sum_refetch = sum(temp_outer_fetch_size)
+                # print("sum_refetch: {}, min_outer_refetch: {}".format(sum_refetch, min_outer_refetch))
+                if sum_refetch < min_outer_refetch:
+                    best_factors = factors
+                    min_outer_refetch = sum_refetch
+            for dim, f in zip(outer_irr_dims, factors):
+                regf_tensor = self.tensor_div(layer_type, conv_strds, regf_tensor, dim, f)
+                gbuf_tensor = self.tensor_div(layer_type, conv_strds, gbuf_tensor, dim, f)
+
+        for dim, f in zip(outer_irr_dims, best_factors):
+            regf_tensor = self.tensor_mul(layer_type, conv_strds, regf_tensor, dim, f)
+            gbuf_tensor = self.tensor_mul(layer_type, conv_strds, gbuf_tensor, dim, f)
+            remain_lcnt[dim] = util.idivc(remain_lcnt[dim], f)
+            tensor_repl_dict[dim] *= f
+
+        # print("best_factors: {}".format(best_factors))
+
+        # Try to fit inm_irr lcnt into tensor.
+        while True:
+            inm_rlvt_dims = self.tdm.get_ltype_rlvt_dims(layer_type, inm_ltype)
+            min_factors = [float('inf') for _ in inm_rlvt_dims]
+            for dim_idx, dim in enumerate(inm_rlvt_dims):
+                min_factor = get_min_factor(remain_lcnt[dim])
+                if min_factor != 1:
+                    min_factors[dim_idx] = min_factor
+            min_factor = min(min_factors)
+            if min_factor == float('inf'):
+                break
+            min_factor_idx = min_factors.index(min_factor)
+            min_factor_dim = inm_rlvt_dims[min_factor_idx]
+
+            regf_tensor = self.tensor_mul(layer_type, conv_strds, regf_tensor, min_factor_dim, min_factor)
+            gbuf_tensor = self.tensor_mul(layer_type, conv_strds, gbuf_tensor, min_factor_dim, min_factor)
+            if is_valid(self.tdm, layer_type, regf_tensor, regf_buf, shr_node_num) and \
+               is_valid(self.tdm, layer_type, gbuf_tensor, gbuf_buf, (1, 1, 1)):
+                remain_lcnt[min_factor_dim] = util.idivc(remain_lcnt[min_factor_dim], min_factor)
+                tensor_repl_dict[min_factor_dim] *= min_factor
+            else:
+                regf_tensor = self.tensor_div(layer_type, conv_strds, regf_tensor, min_factor_dim, min_factor)
+                gbuf_tensor = self.tensor_div(layer_type, conv_strds, gbuf_tensor, min_factor_dim, min_factor)
+                break
+        # print("Final regf_tensor: ", regf_tensor)
+        # print("final gbuf tensor: ", gbuf_tensor)
+        # print("remain lcnt:", remain_lcnt)
+        return frozenset(remain_lcnt.items()), frozenset(regf_tensor.items()), frozenset(tensor_repl_dict.items())
 
     def tensor_div(self, layer_type, conv_strds, tensor, dim, factor):
         if (layer_type == lte.LOCAL and dim == "K") or \
@@ -963,14 +1092,15 @@ class KaplaSolver():
         g_init_datas, g_froz_init_datas = shape_init_data_block(self.tdm, gbuf_unit_tensor)
         g_upd_dims, g_iter_times = self.cost_model.analyze_dim_iters(gbuf_unit_tensor, gbuf_updates, gbuf_workload)
         g_logical_dim, g_buf_sharings, _, _ = self.cost_model.analyze_stacks(g_froz_init_datas, gbuf_stacks,
-                                                            resource.proc_region.dim, BL.GBUF)
+                                                            resource.proc_region.dim, None, BL.GBUF)
         gbuf_unit_accesses = self.cost_model.analyze_relevant_accesses(g_init_datas, g_upd_dims,
                                                     g_iter_times, self.options)
 
         r_init_datas, r_froz_init_datas = shape_init_data_block(self.tdm, regf_unit_tensor)
         r_upd_dims, r_iter_times = self.cost_model.analyze_dim_iters(regf_unit_tensor, regf_updates, regf_workload)
         r_logical_dim, _, r_remote_sharings, r_temporal_sharings = \
-                self.cost_model.analyze_stacks(r_froz_init_datas, regf_stacks, resource.dim_array, BL.REGF)
+                self.cost_model.analyze_stacks(r_froz_init_datas, regf_stacks, resource.dim_array,
+                                               tuple(regf_updates), BL.REGF)
         regf_unit_accesses = self.cost_model.analyze_relevant_accesses(r_init_datas, r_upd_dims,
                                                     r_iter_times, self.options)
         regf_upper_iters = self.cost_model.upper_fetch(r_upd_dims, r_iter_times, g_upd_dims, g_iter_times)
@@ -1112,8 +1242,8 @@ class KaplaSolver():
 
 
 def run_func():
-    # hw_fp = "nn_dataflow/hardwares/multi_node.json"
-    hw_fp = "nn_dataflow/hardwares/single_node.json"
+    hw_fp = "nn_dataflow/hardwares/multi_node.json"
+    # hw_fp = "nn_dataflow/hardwares/single_node.json"
     opt_fp = "nn_dataflow/options/option1.json"
     temp_path = "nn_dataflow/array_mapping_templates/"
     workload = "alex_net"
@@ -1133,8 +1263,8 @@ def run_func():
     options = parse_options(opts)
 
     batch_size = 64
-    # array_mapping = ame.ROW_STATIONARY
-    array_mapping = ame.SYSTOLIC
+    array_mapping = ame.ROW_STATIONARY
+    # array_mapping = ame.SYSTOLIC
 
     solver = KaplaSolver(network, array_mapping, batch_size, resource, unit_cost, options)
 

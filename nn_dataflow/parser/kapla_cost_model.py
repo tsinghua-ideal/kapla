@@ -10,6 +10,7 @@ import nn_dataflow.core.mem_hier_enum as me
 from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
+from nn_dataflow.array_mapping_templates.tensor_dim_map import SystolicTensorDimMap
 
 class KaplaCostModel():
     def __init__(self, network, tensor_dim_map):
@@ -57,7 +58,7 @@ class KaplaCostModel():
         return tuple(upd_dims), tuple(iter_times)
 
     def analyze_relevant_accesses(self, init_datas, upd_dims, iter_times, options):
-        unit_accesses = [0 for _ in range(de.NUM)]
+        unit_accesses = [() for _ in range(de.NUM)]
         for dce in range(de.NUM):
             if self.layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and dce == de.FIL:
                 continue
@@ -96,7 +97,7 @@ class KaplaCostModel():
                             new_evo_list.append((mult_size * dim_size, mult_num * iter_num))
                 db_evo_list = new_evo_list
 
-            unit_accesses[dce] = sum(db_size * iter_time for db_size, iter_time in db_evo_list)
+            unit_accesses[dce] = tuple(db_size * iter_time for db_size, iter_time in db_evo_list)
 
         return unit_accesses
 
@@ -225,15 +226,15 @@ class KaplaCostModel():
             else:
                 rdt_iter = redundant_iters[dce]
             if bufshr is None or not (options.hw_access_forwarding or options.hw_gbuf_sharing):
-                dram_accesses[dce] = unit_accesses[dce] * rdt_iter * logical_node_num
+                dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num
             else:
                 _, shr_node_num, avg_fwd_dist, avg_rot_dist = bufshr
-                dram_accesses[dce] = unit_accesses[dce] * rdt_iter * logical_node_num / shr_node_num
+                dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num / shr_node_num
                 if options.hw_access_forwarding:
-                    fwd_hops[dce] = unit_accesses[dce] * rdt_iter * avg_fwd_dist * (shr_node_num - 1) * logical_node_num / \
+                    fwd_hops[dce] = sum(unit_accesses[dce]) * rdt_iter * avg_fwd_dist * (shr_node_num - 1) * logical_node_num / \
                             shr_node_num
                 if options.hw_gbuf_sharing:
-                    buf_shr_hops[dce] = unit_accesses[dce] * bufshr_rdt_iters[dce] * avg_rot_dist / shr_node_num * (shr_node_num - 1) * \
+                    buf_shr_hops[dce] = sum(unit_accesses[dce]) * bufshr_rdt_iters[dce] * avg_rot_dist / shr_node_num * (shr_node_num - 1) * \
                                 logical_node_num / shr_node_num
 
         return dram_accesses, fwd_hops, buf_shr_hops
@@ -245,28 +246,38 @@ class KaplaCostModel():
         gbuf_accesses = [0 for _ in range(de.NUM)]
         itcn_accesses = [0 for _ in range(de.NUM)]
         for dce in range(de.NUM):
-            rmtshr = None
-            for dtype, shr_num_dict in remote_sharings:
-                if dtype == dce:
-                    rmtshr = shr_num_dict
-                    break
-
-            fetch_time = 0
-            noshr_node_num = logical_node_num
-            for shr_node_num, group_num in rmtshr.items():
-                fetch_time += group_num
-                noshr_node_num -= shr_node_num * group_num
-            fetch_time += noshr_node_num
-
             fetches[dce] = redundant_iters[dce] * upper_iter_num[dce]
             fetches[dce] = 2 * fetches[dce] - 1 if dce == de.OFM else fetches[dce]
-            gbuf_accesses[dce] = unit_accesses[dce] * fetch_time * upper_repl_num * fetches[dce]
-            itcn_accesses[dce] = unit_accesses[dce] * logical_node_num * upper_repl_num * fetches[dce]
+            # If temporal sharing is not empty, only consider temporal sharings because rempte sharings
+            # are contained in temporal sharing.
+            if len(temporal_sharings) > 0:
+                for uac, tmpshr in zip(unit_accesses[dce], temporal_sharings[dce]):
+                    fetch_time = logical_node_num
+                    for shr_node_num, group_num in tmpshr.items():
+                        fetch_time -= shr_node_num * group_num
+                    gbuf_accesses[dce] += uac * fetch_time * upper_repl_num * fetches[dce]
+                    itcn_accesses[dce] += uac * fetch_time * upper_repl_num * fetches[dce]
+            else:
+                rmtshr = None
+                for dtype, shr_num_dict in remote_sharings:
+                    if dtype == dce:
+                        rmtshr = shr_num_dict
+                        break
+
+                fetch_time = 0
+                noshr_node_num = logical_node_num
+                for shr_node_num, group_num in rmtshr.items():
+                    fetch_time += group_num
+                    noshr_node_num -= shr_node_num * group_num
+                fetch_time += noshr_node_num
+
+                gbuf_accesses[dce] = sum(unit_accesses[dce]) * fetch_time * upper_repl_num * fetches[dce]
+                itcn_accesses[dce] = sum(unit_accesses[dce]) * logical_node_num * upper_repl_num * fetches[dce]
 
         return gbuf_accesses, itcn_accesses
 
     @functools.lru_cache(maxsize=1024)
-    def analyze_stacks(self, init_data_tuple, stacks, phy_dims, blk_level):
+    def analyze_stacks(self, init_data_tuple, stacks, phy_dims, updates, blk_level):
         init_datas = []
         for init_data_tp in init_data_tuple:
             init_datas.append(dict(init_data_tp))
@@ -357,8 +368,10 @@ class KaplaCostModel():
                 equations = []
                 variable_idxs = []
                 stack_idx_set = set()
+                equation_dim_list = []
                 for s_dim in data_dims:
                     if s_dim in dim_stack_map:
+                        equation_dim_list.append(s_dim)
                         coefs = []
                         vidxs = []
                         for idx_tuple in dim_stack_map[s_dim]:
@@ -380,15 +393,32 @@ class KaplaCostModel():
                 else:
                     rmt_shr_nodes = self.solve_same_pairs(equations, variable_idxs, stacks_repls)
                     remote_sharings.append((didx, rmt_shr_nodes))
-            # TODO analyze temporal sharings.
+
+                # Analyze temporal sharings.
+                if isinstance(self.tdm, SystolicTensorDimMap):
+                    tmp_shr_list = []
+                    for upd in updates:
+                        diffs = [0 for _ in equation_dim_list]
+                        for s_idx, s_dim in enumerate(equation_dim_list):
+                            for dim_idx in range(0, len(upd) - 1, 2):
+                                upd_dim = upd[dim_idx]
+                                upd_step = upd[dim_idx+1]
+                                if s_dim == upd_dim:
+                                    diffs[s_idx] = upd_step
+                        tmp_shr_nodes = self.solve_same_pairs(equations, variable_idxs,
+                            stacks_repls, diffs)
+                        tmp_shr_list.append(tmp_shr_nodes)
+                    temporal_sharings.append(tmp_shr_list)
         else:
             raise ValueError("Unsupported block level: {}".format(blk_level))
 
         return logical_dim, local_sharings, remote_sharings, temporal_sharings
 
-    def solve_same_pairs(self, equations, variable_idxs, stacks_repls):
+    def solve_same_pairs(self, equations, variable_idxs, stacks_repls, diffs=None):
         # print(equations)
         # print(variable_idxs)
+        if diffs is None:
+            diffs = [0 for _ in equations]
         stack_num = len(stacks_repls)
         variable_list = [("s"+str(i), "t"+str(i)) for i in range(stack_num)]
         s_variables = [var_tp[0] for var_tp in variable_list]
@@ -400,35 +430,40 @@ class KaplaCostModel():
         def _node_retrieve(node_pair):
             s = tuple(map(node_pair.get, s_variables))
             t = tuple(map(node_pair.get, t_variables))
-            v = tuple(sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
-            return s, t, v
+            vs = tuple(sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
+            vt = tuple(sum(c * t[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
+            if vs < vt:
+                return [s,], vs
+            elif vs > vt:
+                return [t,], vt
+            else:
+                return [s, t], vs
 
-        def _create_eq_func(cfs):
-            return lambda *vars: sum(cfs[i] * (vars[2*i] - vars[2*i+1]) for i in range(len(vars) // 2)) == 0
+        def _create_eq_func(cfs, diff):
+            return lambda *vars: sum(cfs[i] * (vars[2*i] - vars[2*i+1]) for i in range(len(vars) // 2)) == diff
 
         _exclude_self_func = \
                 lambda *vars: any(vars[i] != vars[i+1] for i in range(0, len(vars), 2))
-        for coefs, v_idxs in zip(equations, variable_idxs):
+        for coefs, v_idxs, diff in zip(equations, variable_idxs, diffs):
             vs = [variable_list[v_idx] for v_idx in v_idxs]
-            problem.addConstraint(_create_eq_func(coefs), tuple(itertools.chain(*vs)))
+            problem.addConstraint(_create_eq_func(coefs, diff), tuple(itertools.chain(*vs)))
 
         # Exclude the same node.
         problem.addConstraint(_exclude_self_func, tuple(itertools.chain(*variable_list)))
 
         solu = problem.getSolutions()
 
-        node_set = set()
         shr_dict = defaultdict(lambda: set())
         for node_pair in solu:
-            s, t, v = _node_retrieve(node_pair)
-            shr_dict[v].add(s)
-            shr_dict[v].add(t)
+            nodes, v = _node_retrieve(node_pair)
+            for node_crd in nodes:
+                shr_dict[v].add(node_crd)
 
-        rmt_shr_dict = defaultdict(lambda: 0)
+        node_shr_dict = defaultdict(lambda: 0)
         for value in shr_dict.values():
-            rmt_shr_dict[len(value)] += 1
+            node_shr_dict[len(value)] += 1
 
-        return rmt_shr_dict
+        return node_shr_dict
 
 
     def get_avg_dist_in_region(self, region):
