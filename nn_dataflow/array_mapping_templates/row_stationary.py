@@ -2,6 +2,8 @@ from nn_dataflow import util
 from nn_dataflow.core import PhyDim2
 from nn_dataflow.parser.kapla_parse_utils import BL
 
+from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
+
 PARA_DIM_LIST = ["N", "C", "K", "Xo", "Yo"]
 NN_DIM_LIST = ["N", "C", "K", "Xo", "Yo", "Xi", "Yi"]
 
@@ -12,9 +14,9 @@ class RowStationary(object):
         self.physic_region = resource.dim_array
         self.physic_node_dim = resource.proc_region.dim
         self.conv_strds = conv_strds
-        if layer_type in (0, 1):
+        if layer_type in (lte.CONV, lte.LOCAL):
             self.logic_region = PhyDim2(workload["S"], workload["Yo"])
-        elif layer_type in (2, 3):
+        elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
             self.logic_region = PhyDim2(workload["S"], workload["Yi"])
         self.repl_fold()
         self.repls = dict()
@@ -51,7 +53,7 @@ class RowStationary(object):
     def gen_unitpass(self):
         min_cnt_loops = float("inf")
         # ConvLayer
-        if self.layer_type == 0:
+        if self.layer_type == lte.CONV:
             for fact_repl_h in util.factorize(self.repl.h, 3):
                 for fact_repl_w in util.factorize(self.repl.w, 3):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
@@ -93,7 +95,7 @@ class RowStationary(object):
                     regf_unit_tensor["Xi"] = self.workload["R"]
 
                     yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
-        elif self.layer_type == 1:
+        elif self.layer_type == lte.LOCAL:
             for fact_repl_h in util.factorize(self.repl.h, 2):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
@@ -148,7 +150,7 @@ class RowStationary(object):
                         regf_unit_tensor["K"] = 1
 
                     yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
-        elif self.layer_type == 2:
+        elif self.layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
             for fact_repl_h in util.factorize(self.repl.h, 3):
                 for fact_repl_w in util.factorize(self.repl.w, 3):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
@@ -190,7 +192,7 @@ class RowStationary(object):
                     regf_unit_tensor["Xo"] = self.workload["R"]
 
                     yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
-        elif self.layer_type == 3:
+        elif self.layer_type == lte.LOCAL_BACK_H:
             for fact_repl_h in util.factorize(self.repl.h, 2):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
@@ -252,7 +254,7 @@ class RowStationary(object):
             usize[BL.REGF] = regf_unit_tensor
             usize[BL.GBUF] = gbuf_unit_tensor
 
-            if self.layer_type == 0:
+            if self.layer_type == lte.CONV:
                 # construct stack
                 regf_stacks = []
                 regf_stacks.append(("Yi", self.conv_strds[1], "Yo", 1, self.logic_region.w))
@@ -277,7 +279,7 @@ class RowStationary(object):
                 unit_ops = self.workload["R"]
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
-            elif self.layer_type == 1:
+            elif self.layer_type == lte.LOCAL:
                 # construct stack
                 regf_stacks = []
                 regf_stacks.append(("Yi", self.conv_strds[1], "Yo", 1, self.logic_region.w))
@@ -312,7 +314,7 @@ class RowStationary(object):
                     unit_ops = self.conv_strds[2]
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
-            elif self.layer_type == 2:
+            elif self.layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
                 # construct stack
                 regf_stacks = []
                 regf_stacks.append(("Yo", self.conv_strds[1], "Yi", 1, self.logic_region.w))
@@ -337,7 +339,7 @@ class RowStationary(object):
                 unit_ops = self.workload["R"]
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
-            elif self.layer_type == 3:
+            elif self.layer_type == lte.LOCAL_BACK_H:
                 regf_stacks = []
                 regf_stacks.append(("Yo", self.conv_strds[1], "Yi", 1, self.logic_region.w))
                 regf_stacks.append(("S", 1, "Yo", 1, self.logic_region.h))
@@ -376,7 +378,7 @@ class RowStationary(object):
 
     def get_unit_block(self):
         regf_repls = [self.repl.w, self.repl.h]
-        if self.layer_type == 0:
+        if self.layer_type == lte.CONV:
             elapsed_width = self.logic_region.w * util.idivc(self.workload["Yo"], self.logic_region.w)
             if elapsed_width // self.logic_region.w > 1 and \
                all(util.gcd(elapsed_width // self.logic_region.w, node_dim) == 1 for node_dim in self.physic_node_dim):
@@ -387,6 +389,7 @@ class RowStationary(object):
                         self.logic_region = PhyDim2(self.logic_region.h, cand)
                         break
                     cand -= 1
+            self.fold = PhyDim2(self.fold.h, util.idivc(self.workload["Yo"], self.logic_region.w))
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1
@@ -424,7 +427,7 @@ class RowStationary(object):
 
             unit_ops = self.workload["R"]
 
-        elif self.layer_type == 1:
+        elif self.layer_type == lte.LOCAL:
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1
@@ -473,7 +476,7 @@ class RowStationary(object):
                 regf_unit_tensor["C"] = self.conv_strds[2]
                 base_updates.append(("C", self.conv_strds[2], "K", 1))
                 unit_ops = self.conv_strds[2]
-        elif self.layer_type == 2:
+        elif self.layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
             elapsed_width = self.logic_region.w * util.idivc(self.workload["Yi"], self.logic_region.w)
             if elapsed_width // self.logic_region.w > 1 and \
                all(util.gcd(elapsed_width // self.logic_region.w, node_dim) == 1 for node_dim in self.physic_node_dim):
@@ -518,7 +521,7 @@ class RowStationary(object):
                 base_updates.append(("S", self.logic_region.h, "Yo", self.logic_region.h))
 
             unit_ops = self.workload["R"]
-        elif self.layer_type == 3:
+        elif self.layer_type == lte.LOCAL_BACK_H:
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1

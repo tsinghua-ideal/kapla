@@ -134,6 +134,8 @@ class LoopBlockingScheme():
         if self.data_size(BL.REGF) > resource.size_regf \
                 or self.data_size(BL.GBUF) > resource.size_gbuf:
             self.valid = False
+            # print("!Invalid 0: regf: ds {}, resource {} gbuf: ds {}, resource {}".format(
+                #   self.data_size(BL.REGF), resource.size_regf, self.data_size(BL.GBUF), resource.size_gbuf))
             return
         self.valid = True
 
@@ -146,21 +148,27 @@ class LoopBlockingScheme():
 
         self.filter_pinned = False
 
+        if self.nld.rw_data == de.FIL:
+            assert self.dst_is_dram, 'LoopBlockingScheme: ConvBackWeightLayer' \
+                   'shoud be written to dram!'
+
         # If data regions are not DRAM, can only access once, no spilling.
         if not self.src_is_dram:
             if self.fetch[BL.GBUF][de.IFM] > 1:
                 self.valid = False
+                # print("!Invalid 1")
                 return
             if resource.src_data_region == resource.proc_region:
                 # Force to store in gbuf.
                 self.stored_in_gbuf[de.IFM] = True
         if not self.dst_is_dram:
-            if self.fetch[BL.GBUF][de.OFM] > 1:
+            if self.fetch[BL.GBUF][self.nld.rw_data] > 1:
                 self.valid = False
+                # print("!Invalid 2")
                 return
             if resource.dst_data_region == resource.proc_region:
                 # Force to store in gbuf.
-                self.stored_in_gbuf[de.OFM] = True
+                self.stored_in_gbuf[self.nld.rw_data] = True
 
         # Now with the fetch times, we can calculate the actual
         # `stored_in_gbuf` values.
@@ -177,6 +185,7 @@ class LoopBlockingScheme():
         # Recheck size.
         if self.data_size(BL.REGF) > resource.size_regf \
                 or self.data_size(BL.GBUF) > resource.size_gbuf:
+            # print("!Invalid 3")
             self.valid = False
             return
 
@@ -213,7 +222,8 @@ class LoopBlockingScheme():
         # Check resource for filter pinning.
         if resource.no_time_mux:
             if all(self.bl_ts[0][lpe] == 1 for lpe
-                   in self.nld.data_loops[de.FIL].loops()):
+                   in self.nld.data_loops[de.FIL].loops()) and \
+                self.nld.rw_data != de.FIL:
                 self.filter_pinned = True
                 self.fetch[0][de.FIL] = 0
 
@@ -441,10 +451,8 @@ class LoopBlockingScheme():
 
             bl_t = self.bl_ts[bl]
             bl_ord = self.bl_ords[bl]
-
             for dce in range(de.NUM):
                 inntdim_lp = self._innt_dim_loop(dce, bl_t, bl_ord)
-
                 if bl == self.BL.REGF:
                     if inntdim_lp is None and self.nld.regf_reusable[dce]:
                         fe[dce] = self.fetch[bl-1][dce] if bl > 0 else 1
@@ -457,13 +465,12 @@ class LoopBlockingScheme():
                 for lpe in self.nld.data_loops[dce].drop(range(le.NUM)):
                     # When the array_mapping iteration is non-trivial,
                     # the level should be set to innermost.
-                    if not self.nld.regf_reusable[dce]:
+                    if bl == self.BL.REGF and not self.nld.regf_reusable[dce]:
                         bl_start = bl + 1
                     else:
                         bl_start = bl + (bl_ord[lpe] > bl_ord[inntdim_lp])
                     f *= self._bl_tp(slice(bl_start))[lpe]
-
-                fe[dce] = 2 * f - 1 if dce == de.OFM else f
+                fe[dce] = 2 * f - 1 if dce == self.nld.rw_data else f
 
             self.fetch.append(fe)
 
@@ -914,9 +921,9 @@ class LoopBlockingScheme():
                     rotrnds *= util.prod(tpl[1] for tpl
                                          in itertools.islice(lp_t_list,
                                                              idx_odlp))
-                    assert ((buf_fetch + 1) // 2 if dce == de.OFM
+                    assert ((buf_fetch + 1) // 2 if dce == self.nld.rw_data
                             else buf_fetch) % rotrnds == 0
-                    assert rotrnds % ((mem_fetch + 1) // 2 if dce == de.OFM
+                    assert rotrnds % ((mem_fetch + 1) // 2 if dce == self.nld.rw_data
                                       else mem_fetch) == 0
                 # Optimization: after fetching data into GBUF, if the data only
                 # rotate a single time before being replaced, we do not need to
@@ -925,7 +932,7 @@ class LoopBlockingScheme():
                 # next rotation unit one by one. This is already supported as
                 # the data will be broadcast to all nodes regardless of who
                 # stores it (see partition).
-                if rotrnds == ((mem_fetch + 1) // 2 if dce == de.OFM
+                if rotrnds == ((mem_fetch + 1) // 2 if dce == self.nld.rw_data
                                else mem_fetch):
                     rotrnds = 0
                 rot_rnd_cnts.append(rotrnds)
@@ -952,7 +959,7 @@ class LoopBlockingScheme():
                 # Use REGF filling (GBUF fetch).
                 # The last wide fetch before rotation can be combined with the
                 # rotation steps.
-                if dce == de.OFM:
+                if dce == self.nld.rw_data:
                     # For OFM, if we do multiple wide fetch per rotation step,
                     # the last one has both read and write. If there is only
                     # one wide fetch per rotation step, it only has write.

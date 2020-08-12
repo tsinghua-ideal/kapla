@@ -36,6 +36,8 @@ from nn_dataflow.nns import import_network
 
 from nn_dataflow.version import get_version
 
+from nn_dataflow.core.map_strategy import MapStrategySystolic
+
 def stats_dict(dfsch, cost):
     '''
     Get the stats as an OrderedDict from the NNDataflowScheme.
@@ -57,11 +59,27 @@ def stats_dict(dfsch, cost):
     total_access_cost = sum(a * c for a, c
                             in zip(dfsch.total_accesses, cost.mem_hier))
     total_noc_cost = dfsch.total_noc_hops * cost.noc_hop
-    total_static_cost = dfsch.total_time * cost.idl_unit
 
-    # sum_cost = total_op_cost + total_access_cost + total_noc_cost \
-    #         + total_static_cost
-    # assert abs(sum_cost / dfsch.total_cost - 1) < 0.001
+    total_static_cost = dfsch.total_time * cost.idl_unit
+    # total_static_cost = 0
+
+    sum_cost = total_op_cost + total_access_cost + total_noc_cost \
+            + total_static_cost
+    assert abs(sum_cost / dfsch.total_cost - 1) < 0.001
+
+    total_access = [0 for _ in range(me.NUM)]
+    total_rmt_gbuf_acc = 0
+    for sr in dfsch.values():
+        for m in range(me.NUM):
+            total_access[m] += sum(sr.scheme["access"][m])
+        total_rmt_gbuf_acc += sum(sr.scheme["remote_gbuf_access"])
+    access_cost = tuple(c * a for c, a in zip(cost.mem_hier, total_access))
+    remote_gbuf_access_cost = total_rmt_gbuf_acc * cost.mem_hier_at(me.GBUF)
+    stats['total_dram_cost'] = access_cost[me.DRAM]
+    stats['total_sram_cost'] = access_cost[me.GBUF]
+    stats['total_itcn_cost'] = access_cost[me.ITCN]
+    stats['total_regf_cost'] = access_cost[me.REGF]
+    stats['total_rmt_gbuf_cost'] = remote_gbuf_access_cost
 
     stats['total_op_cost'] = total_op_cost
     stats['total_access_cost'] = total_access_cost
@@ -171,8 +189,11 @@ def do_scheduling(args):
                      verbose=args.verbose)
 
     ## Search schedules.
+    if args.array_mapping == 'eyeriss':
+        nnd = NNDataflow(network, batch_size, resource, cost, MapStrategyEyeriss)
+    elif args.array_mapping == 'systolic':
+        nnd = NNDataflow(network, batch_size, resource, cost, MapStrategySystolic)
 
-    nnd = NNDataflow(network, batch_size, resource, cost, MapStrategyEyeriss)
     tbeg = time.time()
     tops, cache_stats = nnd.schedule_search(options)
     tend = time.time()
@@ -312,6 +333,10 @@ def argparser():
                     help='Number of parallel processes to use for search.')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='Show progress and details.')
+
+    ap.add_argument('--array-mapping', default='eyeriss',
+                    choices=['eyeriss', 'systolic'],
+                    help='array mapping templates')
 
     return ap
 

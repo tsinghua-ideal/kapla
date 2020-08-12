@@ -20,7 +20,8 @@ from collections import namedtuple
 from . import parallel_enum as pe
 from .. import util
 from .fmap_range import FmapPosition, FmapRange
-from .layer import ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
+from .layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, \
+    LocalRegionBackLayer
 from .phy_dim2 import PhyDim2
 
 PARTITION_SCHEME_LIST = ['order',
@@ -149,8 +150,12 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
 
         p_nifm = util.idivc(layer.nifm, self.pdims[pe.INPP].size())
         p_nofm = util.idivc(layer.nofm, self.pdims[pe.OUTP].size())
-        p_hofm = util.idivc(layer.hofm, self.pdims[pe.OFMP].h)
-        p_wofm = util.idivc(layer.wofm, self.pdims[pe.OFMP].w)
+        if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+            r_hofm = util.idivc(layer.hifm, self.pdims[pe.OFMP].h)
+            r_wofm = util.idivc(layer.wifm, self.pdims[pe.OFMP].w)
+        else:
+            p_hofm = util.idivc(layer.hofm, self.pdims[pe.OFMP].h)
+            p_wofm = util.idivc(layer.wofm, self.pdims[pe.OFMP].w)
 
         if isinstance(layer, ConvLayer):
             p_layer = ConvLayer(p_nifm, p_nofm, (p_hofm, p_wofm),
@@ -163,26 +168,24 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
             p_layer = LocalRegionLayer(p_nofm, (p_hofm, p_wofm),
                                        layer.nreg, (layer.hreg, layer.wreg),
                                        strd=(layer.htrd, layer.wtrd))
-        elif isinstance(layer, ConvBackLayer):
+        elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
             # print("p_nifm:{}, p_nofm:{}, p_hofm:{}, p_wofm:{}".format(p_nifm, p_nofm, p_hofm, p_wofm))
             # print("INPP:{}, OUTP:{}, OFMP.h:{}, OFMP.w:{}".format(self.pdims[pe.INPP].size(), self.pdims[pe.OUTP].size(), self.pdims[pe.OFMP].h, self.pdims[pe.OFMP].w))
-            r_hofm = util.reverse_high(p_hofm-1, layer.hofm, layer.hfil, layer.htrd) + 1
-            r_wofm = util.reverse_high(p_wofm-1, layer.wofm, layer.wfil, layer.wtrd) + 1
             r_nifm = p_nofm
             r_nofm = p_nifm
             p_layer = ConvLayer(r_nifm, r_nofm, (r_hofm, r_wofm),
                                 (layer.hfil, layer.wfil),
-                                strd=(layer.htrd, layer.wtrd))
+                                strd=(layer.htrd, layer.wtrd),
+                                rw_data=layer.rw_data)
         elif isinstance(layer, LocalRegionBackLayer):
             if self.pdims[pe.INPP].size() > 1:
                 raise ValueError('PartitionScheme: input partitioning is '
                                  'invalid for LocalRegionLayer.')
-            r_hofm = util.reverse_high(p_hofm-1, layer.hofm, layer.hreg, layer.htrd) + 1
-            r_wofm = util.reverse_high(p_wofm-1, layer.wofm, layer.wreg, layer.wtrd) + 1
             r_nofm = util.reverse_high(p_nofm-1, layer.nofm, layer.nreg, layer.ntrd) + 1
             p_layer = LocalRegionLayer(r_nofm, (r_hofm, r_wofm),
                                        layer.nreg, (layer.hreg, layer.wreg),
-                                       strd=(layer.htrd, layer.wtrd))
+                                       strd=(layer.htrd, layer.wtrd),
+                                       rw_data=layer.rw_data)
         else:
             raise TypeError('PartitionScheme: unrecognized layer type.')
 

@@ -8,7 +8,7 @@ import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
 
 from nn_dataflow import util
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
+from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer
 
 
 class LayerTypeEnum():
@@ -17,8 +17,7 @@ class LayerTypeEnum():
     CONV_BACK_H = 2
     LOCAL_BACK_H = 3
     CONV_BACK_W = 4
-    LOCAL_BACK_W = 5
-    NUM = 6
+    NUM = 5
 
 lte = LayerTypeEnum()
 
@@ -37,6 +36,7 @@ class ParallelEnum():
     IFMP = 4
     NUM = 5
 
+pe = ParallelEnum()
 
 def ident_layer_type(layer):
     layer_type = 0
@@ -44,8 +44,10 @@ def ident_layer_type(layer):
         layer_type = lte.CONV
     elif isinstance(layer, LocalRegionLayer):
         layer_type = lte.LOCAL
-    elif isinstance(layer, ConvBackLayer):
+    elif isinstance(layer, ConvBackActLayer):
         layer_type = lte.CONV_BACK_H
+    elif isinstance(layer, ConvBackWeightLayer):
+        layer_type = lte.CONV_BACK_W
     elif isinstance(layer, LocalRegionBackLayer):
         layer_type = lte.LOCAL_BACK_H
     else:
@@ -54,7 +56,7 @@ def ident_layer_type(layer):
 
 
 def get_conv_strds(layer_type, layer):
-    if layer_type in (lte.CONV, lte.CONV_BACK_H):
+    if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
         conv_strds = (layer.wtrd, layer.htrd, 1)
     elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
         conv_strds = (layer.wtrd, layer.htrd, layer.ntrd)
@@ -72,7 +74,14 @@ class RSTensorDimMap(object):
         self.loop_list = [[["C"], ["K"], ["N", "Yo", "Xo"]],
                           [["K"], ["K"], ["N", "Yo", "Xo"]],
                           [["C"], ["K"], ["N", "Yi", "Xi"]],
-                          [["C"], ["C"], ["N", "Yi", "Xi"]]]
+                          [["C"], ["C"], ["N", "Yi", "Xi"]],
+                          [["C"], ["K"], ["N", "Yi", "Xi"]]]
+
+        self.part_list = [[["K"], ["Yo", "Xo"], ["N"], ["C"]],
+                          [["K"], ["Yo", "Xo"], ["N"], ["K"]],
+                          [["K"], ["Yi", "Xi"], ["N"], ["C"]],
+                          [["C"], ["Yi", "Xi"], ["N"], ["C"]],
+                          [["K"], ["Yi", "Xi"], ["N"], ["C"]]]
 
         self.dim_set = set()
         for dl in self.data_list:
@@ -81,7 +90,7 @@ class RSTensorDimMap(object):
     @functools.lru_cache(maxsize=64)
     def get_dtype_irr_dims(self, layer_type, dtype):
         irr_dims = []
-        if layer_type in (lte.CONV, lte.CONV_BACK_H):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
             if dtype == de.FIL:
                 irr_dims = self.loop_list[layer_type][le.BAT]
             elif dtype == de.IFM:
@@ -101,7 +110,7 @@ class RSTensorDimMap(object):
     @functools.lru_cache(maxsize=64)
     def get_dtype_rlvt_dims(self, layer_type, dtype):
         rlvt_dims = []
-        if layer_type in (lte.CONV, lte.CONV_BACK_H):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
             if dtype == de.FIL:
                 rlvt_dims = self.loop_list[layer_type][le.IFM] + self.loop_list[layer_type][le.OFM]
             elif dtype == de.IFM:
@@ -188,20 +197,21 @@ class RSTensorDimMap(object):
                 if dim not in tensor_dims:
                     tensor_dims[dim] = 1
 
-            if tensor_dims.get("Xi") is None:
-                tensor_dims["Xi"] = (tensor_dims["Xo"] - 1) * conv_strds[0] + tensor_dims["R"]
-            if tensor_dims.get("Yi") is None:
-                tensor_dims["Yi"] = (tensor_dims["Yo"] - 1) * conv_strds[1] + tensor_dims["S"]
-        elif layer_type in (lte.CONV_BACK_H, lte.LOCAL_BACK_H):
+            tensor_dims["Xi"] = (tensor_dims["Xo"] - 1) * conv_strds[0] + tensor_dims["R"]
+            tensor_dims["Yi"] = (tensor_dims["Yo"] - 1) * conv_strds[1] + tensor_dims["S"]
+
+            if layer_type == lte.LOCAL:
+                tensor_dims["C"] = tensor_dims["K"] * conv_strds[2]
+        elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
             for dim in self.dim_set - {"Xo", "Yo"}:
                 if dim not in tensor_dims:
                     tensor_dims[dim] = 1
 
-            if tensor_dims.get("Xo") is None:
-                tensor_dims["Xo"] = (tensor_dims["Xi"] - 1) * conv_strds[0] + tensor_dims["R"]
-            if tensor_dims.get("Yo") is None:
-                tensor_dims["Yo"] = (tensor_dims["Yi"] - 1) * conv_strds[1] + tensor_dims["S"]
+            tensor_dims["Xo"] = (tensor_dims["Xi"] - 1) * conv_strds[0] + tensor_dims["R"]
+            tensor_dims["Yo"] = (tensor_dims["Yi"] - 1) * conv_strds[1] + tensor_dims["S"]
 
+            if layer_type == lte.LOCAL_BACK_H:
+                tensor_dims["K"] = tensor_dims["C"] * conv_strds[2]
         # return frozenset(tensor_dims.items())
         return tensor_dims
 
@@ -215,6 +225,28 @@ class RSTensorDimMap(object):
 
         return tensor_sizes
 
+    @functools.lru_cache(maxsize=1024)
+    def get_dim_rlvt_part_type(self, layer_type, dim):
+        rpe = None
+        for penum, pdim_list in enumerate(self.part_list[layer_type]):
+            if dim in pdim_list:
+                rpe = penum
+                break
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and rpe == pe.INPP:
+            rpe = pe.OUTP
+
+        return rpe
+
+    @functools.lru_cache(maxsize=1024)
+    def get_dim_crrspd_ltype(self, layer_type, dim):
+        lpe = None
+        for l, dim_list in enumerate(self.loop_list[layer_type]):
+            if dim in dim_list:
+                lpe = l
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and lpe == le.IFM:
+            lpe = le.OFM
+        return lpe
+
 
 class SystolicTensorDimMap(object):
     '''
@@ -224,6 +256,8 @@ class SystolicTensorDimMap(object):
         self.data_list = [["C", "F", "K"], ["N", "C", "F", "XY"], ["N", "K", "XY"]]
         self.loop_list = [[["C"], ["K"], ["N", "XY"]],
                           [["K"], ["K"], ["N", "XY"]]]
+        self.part_list = [[["K"], ["XY"], ["N"], ["C"]],
+                          [["K"], ["XY"], ["N"], ["K"]]]
 
         self.dim_set = set()
         for dl in self.data_list:
@@ -232,7 +266,7 @@ class SystolicTensorDimMap(object):
     @functools.lru_cache(maxsize=64)
     def get_dtype_irr_dims(self, layer_type, dtype):
         irr_dims = []
-        if layer_type in (lte.CONV, lte.CONV_BACK_H):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
             if dtype == de.FIL:
                 irr_dims = self.loop_list[layer_type][le.BAT]
             elif dtype == de.IFM:
@@ -252,7 +286,7 @@ class SystolicTensorDimMap(object):
     @functools.lru_cache(maxsize=64)
     def get_dtype_rlvt_dims(self, layer_type, dtype):
         rlvt_dims = []
-        if layer_type in (lte.CONV, lte.CONV_BACK_H):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
             if dtype == de.FIL:
                 rlvt_dims = self.loop_list[layer_type][le.IFM] + self.loop_list[layer_type][le.OFM]
             elif dtype == de.IFM:
@@ -350,3 +384,24 @@ class SystolicTensorDimMap(object):
             tensor_sizes[d] = util.prod(tvs)
 
         return tensor_sizes
+
+    def get_dim_rlvt_part_type(self, layer_type, dim):
+        rpe = None
+        for penum, pdim_list in enumerate(self.part_list[layer_type]):
+            if dim in pdim_list:
+                rpe = penum
+                break
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and rpe == pe.INPP:
+            rpe = pe.OUTP
+
+        return rpe
+
+    @functools.lru_cache(maxsize=1024)
+    def get_dim_crrspd_ltype(self, layer_type, dim):
+        lpe = None
+        for l, dim_list in enumerate(self.loop_list[layer_type]):
+            if dim in dim_list:
+                lpe = l
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and lpe == le.IFM:
+            lpe = le.OFM
+        return lpe

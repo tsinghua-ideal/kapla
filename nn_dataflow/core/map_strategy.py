@@ -13,12 +13,13 @@ PARTICULAR PURPOSE. See the BSD-3 License for more details.
 You should have received a copy of the Modified BSD-3 License along with this
 program. If not, see <https://opensource.org/licenses/BSD-3-Clause>.
 """
-
+import itertools
 from . import data_category_enum as de
 from . import loop_enum as le
 from . import mem_hier_enum as me
 from .. import util
-from .layer import Layer, ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
+from .layer import Layer, ConvLayer, LocalRegionLayer, ConvBackActLayer, \
+    LocalRegionBackLayer, ConvBackWeightLayer
 from .nested_loop_desc import NestedLoopDesc
 from .phy_dim2 import PhyDim2
 
@@ -80,7 +81,7 @@ class MapStrategyEyeriss(MapStrategy):
             self.ops_lpe = self.layer.nreg * self.layer.wreg * self.layer.wofm
             self.dim_lpeset = PhyDim2(h=self.layer.hreg, w=self.layer.hofm)
             cnt_lpeset = self.batch_size * self.layer.nofm
-        elif isinstance(self.layer, ConvBackLayer):
+        elif isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer)):
             self.ops_lpe = self.layer.wfil * self.layer.wifm
             self.dim_lpeset = PhyDim2(self.layer.hfil, self.layer.hifm)
             cnt_lpeset = self.batch_size * self.layer.nifm * self.layer.nofm
@@ -93,7 +94,7 @@ class MapStrategyEyeriss(MapStrategy):
                             .format(type(self.layer)))
 
         ops_logic_total = self.ops_lpe * self.dim_lpeset.size() * cnt_lpeset
-        if isinstance(layer, ConvBackLayer):
+        if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
             print("batch_size: {}".format(self.batch_size))
             print("wfil: {}, wofm: {}".format(self.layer.wfil, self.layer.wofm))
             print("dim_lpeset: {}".format(self.dim_lpeset))
@@ -239,7 +240,8 @@ class MapStrategyEyeriss(MapStrategy):
                                  usize_gbuf=usize_gbuf, usize_regf=usize_regf,
                                  unit_ops=unit_ops, unit_time=unit_time,
                                  data_loops=data_loops,
-                                 regf_reusable=_regf_reusable)
+                                 regf_reusable=_regf_reusable,
+                                 rw_data=self.layer.rw_data)
 
             # Check num of ops.
             util.assert_float_eq_int(
@@ -251,7 +253,7 @@ class MapStrategyEyeriss(MapStrategy):
             util.assert_float_eq_int(
                 nld.total_access_at_of(me.DRAM, de.FIL),
                 self.layer.total_filter_size()
-                if isinstance(self.layer, (ConvLayer, ConvBackLayer)) else 0,
+                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)) else 0,
                 'MapEyeriss: total access at DRAM for FIL {} is incorrect.'
                 .format(nld.total_access_at_of(me.DRAM, de.FIL)))
             util.assert_float_eq_int(
@@ -268,7 +270,7 @@ class MapStrategyEyeriss(MapStrategy):
             util.assert_float_eq_int(
                 nld.unit_access_at_of(me.REGF, de.FIL) * util.prod(nld.loopcnt),
                 self.layer.total_ops(self.batch_size) * self.occupancy
-                if isinstance(self.layer, (ConvLayer, ConvBackLayer)) else 0,
+                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)) else 0,
                 'MapEyeriss: unit access at REGF for FIL {} is incorrect.'
                 .format(nld.unit_access_at_of(me.REGF)))
             util.assert_float_eq_int(
@@ -287,16 +289,19 @@ class MapStrategyEyeriss(MapStrategy):
                 usize_regf = list(nld.usize_regf)
                 loopcnt = list(nld.loopcnt)
                 unit_access = [list(ua) for ua in nld.unit_access]
+                regf_reusable = list(nld.regf_reusable)
                 usize_gbuf[de.IFM], usize_gbuf[de.OFM] = nld.usize_gbuf[de.OFM], nld.usize_gbuf[de.IFM]
                 usize_regf[de.IFM], usize_regf[de.OFM] = nld.usize_regf[de.OFM], nld.usize_regf[de.IFM]
                 loopcnt[le.IFM], loopcnt[le.OFM] = nld.loopcnt[le.OFM], nld.loopcnt[de.IFM]
+                regf_reusable[de.IFM], regf_reusable[de.OFM] = regf_reusable[de.OFM], regf_reusable[de.IFM]
 
                 for m in range(me.NUM):
                     unit_access[m][de.IFM], unit_access[m][de.OFM] = nld.unit_access[m][de.OFM], nld.unit_access[m][de.IFM]
                 nld._replace(usize_gbuf=tuple(usize_gbuf),
                              usize_regf=tuple(usize_regf),
                              loopcnt=tuple(loopcnt),
-                             unit_access=tuple(tuple(ua) for ua in unit_access))
+                             unit_access=tuple(tuple(ua) for ua in unit_access),
+                             regf_reusable=tuple(regf_reusable))
 
             yield nld
 
@@ -503,7 +508,7 @@ class MapStrategyEyeriss(MapStrategy):
             self._regf_reusable[de.OFM] = (buflayer.wofm == 1)
             self._regf_reusable[de.FIL] = (self.fold.h == 1)
 
-        elif isinstance(self.layer, ConvBackLayer):
+        elif isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer)):
             # A unitpass processes all folded fils, and one folded ifm/ofm.
             # Row size is not affected sicne a row is within one PE.
             acclayer = ConvLayer(
@@ -693,7 +698,7 @@ class MapStrategyEyeriss(MapStrategy):
 
             yield tuple(lcnt), locc, repl_size, repl_cnt
 
-        elif isinstance(self.layer, ConvBackLayer):
+        elif isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer)):
             # repl.w is only used for ifmaps, and repl.h can be used either for ifmaps or ofmaps.
 
             min_cnt_loops = float('inf')
@@ -729,3 +734,414 @@ class MapStrategyEyeriss(MapStrategy):
                 yield tuple(lcnt), locc, repl_size, repl_cnt
         else:
             raise TypeError("map_strategy: Invalid layer type: {}".format(self.layer.__class__.__name__))
+
+
+class MapStrategySystolic(MapStrategy):
+    '''
+    "In-datacenter performance analysis of a tensor processing unit."
+    Jouppi, Norman P., et al. ISCA'17.
+    Since a lot of implementation details are not revealed, we follow the high
+    level design methods described in both the paper and relating patents.
+    To improve the overall occupancy, we allow the systolic array to be divided
+    into individual blocks for independent computations.
+    In TPU architecture the pooling operations are actually done using dedicated
+    hardware instead of systolic array. For simplicity we also process pooling
+    layer on the array.
+    '''
+    def __init__(self, layer, batch_size, occupancy, dim_array, reverse_mapping=False):
+
+        super(MapStrategySystolic, self).__init__(layer, batch_size, occupancy,
+                                             dim_array, reverse_mapping)
+        print(layer)
+
+        if reverse_mapping:
+            raise ValueError("MapSystolic: Not support back-prop layer!")
+
+        # Logic PE set.
+        if isinstance(self.layer, ConvLayer):
+            # Conv and FC layers.
+            self.ops_lpe = self.layer.wfil * self.layer.hfil
+            self.dim_lpeset = PhyDim2(self.layer.hofm*self.layer.wofm,
+                                      self.layer.nofm)
+            cnt_lpeset = self.batch_size * self.layer.nifm
+        elif isinstance(self.layer, LocalRegionLayer):
+            self.ops_lpe = self.layer.nreg * self.layer.wreg * self.layer.hreg
+            self.dim_lpeset = PhyDim2(self.layer.hofm*self.layer.wofm,
+                                      self.layer.nofm)
+            cnt_lpeset = self.batch_size
+        else:
+            raise TypeError('MapSystolic: unrecognized layer type {}.'
+                            .format(type(self.layer)))
+
+        ops_logic_total = self.ops_lpe * self.dim_lpeset.size() * cnt_lpeset
+        assert ops_logic_total == self.layer.total_ops(self.batch_size)
+
+        # Physical PE set through replication and folding.
+        self._repl_fold()
+
+        # PE utilization.
+        # We replicate repl.size() lpesets, and then fold to fold.size()
+        # physical array passes.
+        self.util = 1. * (self.dim_lpeset.size() * self.repl.size()) \
+                / (self.dim_array.size() * self.fold.size())
+        assert self.util <= 1. + 1e-6
+
+        # assert self.util > 0.3, \
+        #     ('MapTPU: PE array resource utilization < 50%. '
+        #      'Physical PE set {}; array size {}; logic PE set {}; '
+        #      'folded logic PE set {}. Can\'t we fit more?'
+        #      .format(self.dim_ppeset, self.dim_array,
+        #              self.dim_lpeset, self.dim_flpeset))
+
+    def utilization(self):
+        return self.util
+
+    def gen_nested_loop_desc(self):
+        '''
+        Replication and folding:
+        - ConvLayer
+            - repl.w is only used for ifm; repl.h is only used for batch.
+            - fold.h folds ofm, which uses different feature map blocks but same
+              filters; fold.w folds filters.
+        - LocalRegionlayer
+            - repl is used for batch, ofm and nreg, since ofm/ifm relationship is
+              one-to-one rather than all-to-all.
+            - fold.h folds ofm, which uses different feature map blocks but same
+              filters.
+        '''
+
+        ops_unitpass, time_unitpass, access_unitpass, \
+                sz_gbuf_unitpass, sz_regf_unitpass, amp_acc_ifm = \
+                self._calc_unitpass()
+
+        data_loops = self.layer.data_loops()
+
+        for lcnt, locc, rsz, rcnt in self._gen_repl():
+
+            # Number of ops.
+            # Replicate to procpass. Also consider external occupancy and loop
+            # occupancies.
+            unit_ops = ops_unitpass * rsz * self.occupancy * util.prod(locc)
+            # Time does not change with replication, and is not affected by
+            # loop occupancy.
+            unit_time = time_unitpass
+
+            # Buffered data size.
+            # Replication uses the single gbuf.
+            usize_gbuf = tuple(s * n for s, n in zip(sz_gbuf_unitpass, rcnt))
+            # Replication uses different PEs.
+            usize_regf = tuple(sz_regf_unitpass)
+
+            # Unit access, i.e., data accesses for one processing pass.
+            # Replicate to procpass. Also consider loop occupancies.
+            uaccess = [tuple() for _ in range(me.NUM)]
+            # Loop occupancies affect accesses.
+            aocc = [util.prod(data_loops[dce].take(locc))
+                    for dce in range(de.NUM)]
+            # Replication uses the single DRAM, gbuf, itcn.
+            for mhe in [me.DRAM, me.GBUF, me.ITCN]:
+                uaccess[mhe] = tuple(a * n * o for a, n, o
+                                     in zip(access_unitpass[mhe], rcnt, aocc))
+            # Replication uses different PEs. regf scales with op replication,
+            # i.e., affected by all loop occupancies. Also consider external
+            # occupancy.
+            uaccess[me.REGF] = tuple(a * rsz * self.occupancy * util.prod(locc)
+                                     for a in access_unitpass[me.REGF])
+            # Finalize.
+            unit_access = tuple(uaccess)
+            _regf_reusable = tuple(self._regf_reusable)
+
+            # Make nested loop desc.
+            nld = NestedLoopDesc(loopcnt=lcnt, unit_access=unit_access,
+                                 usize_gbuf=usize_gbuf, usize_regf=usize_regf,
+                                 unit_ops=unit_ops, unit_time=unit_time,
+                                 data_loops=data_loops,
+                                 regf_reusable=_regf_reusable,
+                                 rw_data=self.layer.rw_data)
+
+            # Check num of ops.
+            util.assert_float_eq_int(
+                nld.total_ops(),
+                self.layer.total_ops(self.batch_size) * self.occupancy,
+                'MapSystolic: total number of physical ops is incorrect.')
+
+            # Check unit access.
+            util.assert_float_eq_int(
+                nld.total_access_at_of(me.DRAM, de.FIL),
+                self.layer.total_filter_size()
+                if isinstance(self.layer, ConvLayer) else 0,
+                'MapSystolic: total access at DRAM for FIL {} is incorrect.'
+                .format(nld.total_access_at_of(me.DRAM, de.FIL)))
+            util.assert_float_eq_int(
+                # Need to consider amplified access for IFM.
+                nld.total_access_at_of(me.DRAM, de.IFM) / amp_acc_ifm,
+                self.layer.total_ifmap_size(self.batch_size),
+                'MapSystolic: total access at DRAM for IFM {} is incorrect.'
+                .format(nld.total_access_at_of(me.DRAM, de.IFM)))
+            util.assert_float_eq_int(
+                nld.total_access_at_of(me.DRAM, de.OFM),
+                self.layer.total_ofmap_size(self.batch_size),
+                'MapSystolic: total access at DRAM for OFM {} is incorrect.'
+                .format(nld.total_access_at_of(me.DRAM, de.OFM)))
+            util.assert_float_eq_int(
+                nld.unit_access_at_of(me.REGF, de.FIL) * util.prod(nld.loopcnt),
+                self.layer.total_ops(self.batch_size) * self.occupancy
+                if isinstance(self.layer, ConvLayer) else 0,
+                'MapSystolic: unit access at REGF for FIL {} is incorrect.'
+                .format(nld.unit_access_at_of(me.REGF)))
+            util.assert_float_eq_int(
+                nld.unit_access_at_of(me.REGF, de.IFM) * util.prod(nld.loopcnt),
+                self.layer.total_ops(self.batch_size) * self.occupancy,
+                'MapSystolic: unit access at REGF for IFM {} is incorrect.'
+                .format(nld.unit_access_at_of(me.REGF)))
+            util.assert_float_eq_int(
+                nld.unit_access_at_of(me.REGF, de.OFM) * util.prod(nld.loopcnt),
+                self.layer.total_ops(self.batch_size) * self.occupancy,
+                'MapSystolic: unit access at REGF for OFM {} is incorrect.'
+                .format(nld.unit_access_at_of(me.REGF)))
+
+            yield nld
+
+
+    def _repl_fold(self):
+        '''
+        Find the replication and folding factors from logic PE set to physical
+        array.
+        '''
+        fold_w = 1
+        repl_w = 1
+        fold_h = 1
+        repl_h = 1
+
+        if self.dim_lpeset.h > self.dim_array.h:
+            # Fold on height.
+            print(self.dim_lpeset.h, self.dim_array.h)
+            fold_h = util.idivc(self.dim_lpeset.h, self.dim_array.h)
+        else:
+            # Replicate on height.
+            repl_h = self.dim_array.h // self.dim_lpeset.h
+        if self.dim_lpeset.w > self.dim_array.w:
+            # Fold on width.
+            fold_w = util.idivc(self.dim_lpeset.w, self.dim_array.w)
+        else:
+            # Replicate on with.
+            repl_w = self.dim_array.w // self.dim_lpeset.w
+
+        # The replication and folding factors for lpeset, considering the
+        # adjustment.
+        self.fold = PhyDim2(fold_h, fold_w)
+        self.repl = PhyDim2(repl_h, repl_w)
+
+        # The folded lpeset size on the ppeset after adjustment. The width may
+        # be larger than the array width, but it is actually broken into the
+        # height replication.
+        self.dim_flpeset = PhyDim2(util.idivc(self.dim_lpeset.h, self.fold.h),
+                                   util.idivc(self.dim_lpeset.w, self.fold.w))
+
+        # The physical ppeset size, should fit in the array.
+        self.dim_ppeset = PhyDim2(self.dim_flpeset.h * self.repl.h,
+                                  self.dim_flpeset.w * self.repl.w)
+
+        assert (self.dim_ppeset.h <= self.dim_array.h
+                and self.dim_ppeset.w <= self.dim_array.w), \
+                'MapTPU: dim_ppeset {} does not fit in dim_array {}.' \
+                .format(self.dim_ppeset, self.dim_array)
+
+    def _calc_unitpass(self):
+        '''
+        Calculate the ops, time, accessed data size, and buffered data size for
+        one unit pass.
+        Return ops, time, accessed size for all hierarchies, and buffered size
+        in gbuf and regf. Also return the amplified access ratio for ifmaps.
+        '''
+        ops = float('nan')
+        time = float('nan')
+        access = [[float('nan')] * de.NUM for _ in range(me.NUM)]
+        sz_gbuf = [float('nan')] * de.NUM
+        sz_regf = [float('nan')] * de.NUM
+
+        if isinstance(self.layer, ConvLayer):
+
+            # adjust fold_h
+            fold_hofm = util.closest_factor(self.fold.h, factor=self.fold.h/2)[0]
+            fold_wofm = self.fold.h / fold_hofm
+            # A unitpass processes convolutions on one folded ifm/ofm with one
+            # folded fils.
+            acclayer = ConvLayer(
+                1, 1. * self.layer.nofm / self.fold.w,
+                (1. * self.layer.hofm / fold_hofm, 1. * self.layer.wofm / fold_wofm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+            print("acclayer:")
+            print(acclayer)
+            print("repl:")
+            print(self.repl)
+            print("fold:")
+            print(self.fold)
+            print(self.dim_flpeset)
+
+            ops = acclayer.total_ops()
+            time = self.ops_lpe
+
+            # Data are accessed once from DRAM into gbuf.
+            access[me.DRAM][de.FIL] = acclayer.total_filter_size()
+            access[me.DRAM][de.IFM] = acclayer.total_ifmap_size()
+            access[me.DRAM][de.OFM] = acclayer.total_ofmap_size()
+
+            # To iterate all folded fils over the fmaps, we have two choices
+            # for ConvLayer:
+            # a) only store one folded fil in regf and access fmaps multiple
+            # times from gbuf;
+            # b) store all folded fils in regf and only access fmaps once from
+            # gbuf.
+            # To save regf size, we choose a).
+            access[me.GBUF][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.GBUF][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.GBUF][de.OFM] = access[me.DRAM][de.OFM]
+
+            # All data from/to regf go through itcn.
+            # Data per PE * number of PEs * number of rounds (flpsets).
+            access[me.ITCN][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.ITCN][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.ITCN][de.OFM] = access[me.DRAM][de.OFM]
+
+            # regf access is based on num of ops.
+            access[me.REGF] = [ops] * de.NUM
+
+            sz_gbuf[de.FIL] = acclayer.total_filter_size()
+            sz_gbuf[de.IFM] = acclayer.total_ifmap_size()
+            sz_gbuf[de.OFM] = acclayer.total_ofmap_size()
+
+            # Entire fil row of one folded fil per PE.
+            sz_regf[de.FIL] = 1
+            sz_regf[de.IFM] = 1
+            sz_regf[de.OFM] = 1
+
+        else:
+            assert isinstance(self.layer, LocalRegionLayer)
+
+            # adjust fold_h
+            fold_hofm = util.closest_factor(self.fold.h, factor=self.fold.h/2)[0]
+            fold_wofm = self.fold.h / fold_hofm
+            # A unitpass processes one folded region, and one folded ifm/ofm.
+            acclayer = LocalRegionLayer(
+                1. * self.layer.nofm / self.fold.w,
+                (1. * self.layer.hofm / fold_hofm, 1. * self.layer.wofm / fold_wofm),
+                self.layer.nreg, (self.layer.hreg, self.layer.wreg),
+                strd=(self.layer.htrd, self.layer.wtrd))
+
+            ops = acclayer.total_ops()
+
+            time = self.ops_lpe
+
+            # Data are accessed once from DRAM into gbuf.
+            access[me.DRAM][de.FIL] = 0
+            access[me.DRAM][de.IFM] = acclayer.total_ifmap_size()
+            access[me.DRAM][de.OFM] = acclayer.total_ofmap_size()
+
+            access[me.GBUF][de.FIL] = 0
+            access[me.GBUF][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.GBUF][de.OFM] = access[me.DRAM][de.OFM]
+
+            # All data from/to regf go through itcn.
+            # Data per PE * number of PEs * number of rounds (flpsets).
+            access[me.ITCN][de.FIL] = 0
+            access[me.ITCN][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.ITCN][de.OFM] = access[me.DRAM][de.OFM]
+
+            # regf access is based on num of ops.
+            access[me.REGF][de.FIL] = 0
+            access[me.REGF][de.IFM] = ops
+            access[me.REGF][de.OFM] = ops
+
+            sz_gbuf[de.FIL] = 0
+            sz_gbuf[de.IFM] = acclayer.total_ifmap_size()
+            sz_gbuf[de.OFM] = acclayer.total_ofmap_size()
+
+            sz_regf[de.FIL] = 0
+            sz_regf[de.IFM] = acclayer.nreg
+            sz_regf[de.OFM] = 1
+
+        # All utilized PEs run `time` to execute replicated `ops`
+        assert util.isclose(time * self.dim_array.size() * self.util,
+                            ops * self.repl.size(),
+                            abs_tol=1e-3)
+
+        amp_acc_ifm = 1. * acclayer.hifm * fold_hofm / self.layer.hifm * \
+                      1. * acclayer.wifm * fold_wofm / self.layer.wifm
+
+        self._regf_reusable[de.IFM] = False
+        self._regf_reusable[de.OFM] = True
+        self._regf_reusable[de.FIL] = False
+
+        return ops, time, access, sz_gbuf, sz_regf, amp_acc_ifm
+
+    def _gen_repl(self):
+        '''
+        Generate all replication with ifmaps/ofmaps, to build procpass from
+        unitpass.
+        Return the total loop count tuple, the loop occupancy list, the actual
+        replication size, and the replicatd data counts.
+        '''
+        if isinstance(self.layer, ConvLayer):
+            # repl.w is only used for ifm; repl.h is only used for batch.
+
+            # Loop body unit time is constant w.r.t. the split of repl.h, so we
+            # pick the smallest total number of loops.
+            ifms = self.repl.w
+            batches = self.repl.h
+            repl_size = ifms * batches
+
+            # Loop trip counts.
+            lcnt = [float('nan')] * le.NUM
+            lcnt[le.IFM] = util.idivc(self.layer.nifm, ifms)
+            lcnt[le.OFM] = self.fold.w
+            # fold.w is equivalent to increasing batch size.
+            lcnt[le.BAT] = util.idivc(self.batch_size, batches) * self.fold.h
+
+            # Loop occupancy.
+            locc = [1.] * le.NUM
+            locc[le.IFM] = 1. * self.layer.nifm / ifms / \
+                           lcnt[le.IFM]
+            locc[le.BAT] = 1. * self.batch_size / batches * self.fold.h / \
+                           lcnt[le.BAT]
+
+            # Replicated data counts.
+            repl_cnt = [0] * de.NUM
+            repl_cnt[de.FIL] = ifms
+            repl_cnt[de.IFM] = ifms * batches
+            repl_cnt[de.OFM] = batches
+
+            yield tuple(lcnt), locc, repl_size, repl_cnt
+
+        else:
+            assert isinstance(self.layer, LocalRegionLayer)
+            for t_repl_h, t_repl_w in itertools.product(
+                    util.factorize(self.repl.h, 2),
+                    util.factorize(self.repl.w, 2)):
+                batches = t_repl_h[0] * t_repl_w[0]
+                ofmaps =  t_repl_h[1] * t_repl_w[1]
+
+                batches = min(batches, self.batch_size)
+                ofmaps = min(ofmaps, self.layer.nofm)
+                repl_size = batches * ofmaps
+
+                # Loop trip counts.
+                lcnt = [float('nan')] * le.NUM
+                lcnt[le.IFM] = 1
+                lcnt[le.OFM] = util.idivc(self.fold.w, ofmaps)
+                lcnt[le.BAT] = util.idivc(self.batch_size, batches) * \
+                               self.fold.h
+
+                # Loop occupancy.
+                locc = [1.] * le.NUM
+                locc[le.OFM] = 1. * self.fold.w / ofmaps / lcnt[le.OFM]
+                locc[le.BAT] = 1. * self.batch_size * self.fold.h / batches / lcnt[le.BAT]
+
+                # Replicated data counts.
+                repl_cnt = [0] * de.NUM
+                repl_cnt[de.FIL] = 0
+                repl_cnt[de.IFM] = ofmaps * batches
+                repl_cnt[de.OFM] = ofmaps * batches
+
+                yield tuple(lcnt), locc, repl_size, repl_cnt

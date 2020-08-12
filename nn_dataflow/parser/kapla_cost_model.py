@@ -7,7 +7,8 @@ from nn_dataflow import util
 import nn_dataflow.core.loop_enum as le
 import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
+from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, \
+    ConvBackWeightLayer, LocalRegionBackLayer
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 from nn_dataflow.array_mapping_templates.tensor_dim_map import SystolicTensorDimMap
@@ -21,6 +22,11 @@ class KaplaCostModel():
         if layer_type not in range(lte.NUM):
             raise TypeError("Invalid layer type : {}".format(layer_type))
         self.layer_type = layer_type
+
+        if self.layer_type == lte.CONV_BACK_W:
+            self.rw_data = de.FIL
+        else:
+            self.rw_data = de.OFM
 
     def parse_update_drc(self, upd_drc):
         dims_strds = []
@@ -199,7 +205,7 @@ class KaplaCostModel():
                     if dim in self.tdm.data_list[dce]:
                         is_trivial[dce] = False
         for dce in range(de.NUM):
-            if (bufshr_rdt_iters[dce] == ((g_redundant_iters[dce] + 1) // 2 if dce == de.OFM
+            if (bufshr_rdt_iters[dce] == ((g_redundant_iters[dce] + 1) // 2 if dce == self.rw_data
                                         else g_redundant_iters[dce])) or \
                 opt_out_bufshr or \
                 is_trivial[dce]:
@@ -221,7 +227,7 @@ class KaplaCostModel():
                     bufshr = bs
                     break
 
-            if dce == de.OFM:
+            if dce == self.rw_data:
                 rdt_iter = 2 * redundant_iters[dce] - 1
             else:
                 rdt_iter = redundant_iters[dce]
@@ -247,7 +253,7 @@ class KaplaCostModel():
         itcn_accesses = [0 for _ in range(de.NUM)]
         for dce in range(de.NUM):
             fetches[dce] = redundant_iters[dce] * upper_iter_num[dce]
-            fetches[dce] = 2 * fetches[dce] - 1 if dce == de.OFM else fetches[dce]
+            fetches[dce] = 2 * fetches[dce] - 1 if dce == self.rw_data else fetches[dce]
             # If temporal sharing is not empty, only consider temporal sharings because rempte sharings
             # are contained in temporal sharing.
             if len(temporal_sharings) > 0:
@@ -502,7 +508,6 @@ class KaplaCostModel():
         return inter_layer_dist
 
     def seg_time_estimation(self, segment, seg_times, real_cstr_dict):
-        # print("^^TEMP: seg_time_estimation:")
         bat_ngrp = 0
         ifm_ngrp = 0
         ofm_ngrp = 0
@@ -518,7 +523,8 @@ class KaplaCostModel():
                 proc_t, dram_t, bus_t = times
                 layer_t = max(proc_t, dram_t, bus_t)
                 dram_time += dram_t
-                is_conv = isinstance(self.network[layer_name], (ConvLayer, ConvBackLayer))
+                is_conv = isinstance(self.network[layer_name],
+                    (ConvLayer, ConvBackActLayer, ConvBackWeightLayer))
                 real_cstr = real_cstr_dict[layer_name]
                 if not bat_ngrp:
                     bat_ngrp = real_cstr.topbat

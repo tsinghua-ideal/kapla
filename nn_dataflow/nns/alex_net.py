@@ -15,7 +15,7 @@ program. If not, see <https://opensource.org/licenses/BSD-3-Clause>.
 """
 
 from nn_dataflow.core import Network
-from nn_dataflow.core import InputLayer, ConvLayer, FCLayer, PoolingLayer, ConvBackLayer, FCBackLayer, PoolingBackLayer
+from nn_dataflow.core import InputLayer, ConvLayer, FCLayer, PoolingLayer
 
 '''
 AlexNet

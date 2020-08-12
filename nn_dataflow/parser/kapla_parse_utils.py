@@ -5,9 +5,11 @@ from nn_dataflow.core import PhyDim2, NodeRegion, Resource, Option, Cost
 import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
 import nn_dataflow.core.loop_enum as le
-from nn_dataflow.core.layer import ConvLayer, ConvBackLayer, LocalRegionLayer, LocalRegionBackLayer
+from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, \
+    LocalRegionLayer, LocalRegionBackLayer
 from nn_dataflow import util
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
+from nn_dataflow.array_mapping_templates.tensor_dim_map import ParallelEnum as pe
 
 class BL():
     '''
@@ -92,8 +94,10 @@ def parse_hardware(hw_desc):
     word = (word_bit + 7) // 8
     # Due to our ideal abstraction, it may not be precisely the exactly resource usage we'd expect.
     # Therefore we conservatively shrink the available buffer size.
-    size_gbuf = gbuf_spec['size'] // word * 0.99
-    size_regf = regf_spec['size'] // word * 0.99
+    real_size_gbuf = gbuf_spec['size'] // word
+    real_size_regf = regf_spec['size'] // word
+    size_gbuf = 0.99 * real_size_gbuf
+    size_regf = 0.99 * real_size_regf
 
     array_bus_width = dram_spec['bus_width'] // word_bit
     if not array_bus_width:
@@ -158,18 +162,18 @@ def layer2workload(array_mapping, layer, batch_size):
         layer_tensor['Yi'] = layer.wifm
         layer_tensor['Xo'] = layer.hofm
         layer_tensor['Yo'] = layer.wofm
-        if isinstance(layer, (ConvLayer, ConvBackLayer)):
+        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
             layer_tensor['R'] = layer.hfil
             layer_tensor['S'] = layer.wfil
         elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
             layer_tensor['R'] = layer.hreg
-            layer_tensor['S'] = layer.wreg * layer.nreg
+            layer_tensor['S'] = layer.wreg
     elif array_mapping == ame.SYSTOLIC:
         layer_tensor['N'] = batch_size
         layer_tensor['C'] = layer.nifm
         layer_tensor['K'] = layer.nofm
         layer_tensor['XY'] = layer.hofm * layer.wofm
-        if isinstance(layer, (ConvLayer, ConvBackLayer)):
+        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
             layer_tensor['F'] = layer.wfil * layer.hfil
         elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
             layer_tensor['F'] = layer.wreg * layer.wreg
@@ -198,31 +202,82 @@ def get_min_factor(number):
     return min_factor
 
 
-def nn_rearrange(seg_no, seg_dfs, prev_nndfs):
-    nndf = []
-    for seg_df in seg_dfs:
-        cur_df, cur_cost, cur_seg_time, cur_total_cost = seg_df
-        for layer_df in cur_df.values():
-            layer_df["seg_no"] = seg_no
-        if len(prev_nndfs) == 0:
-            _df = OrderedDict()
-            _df.update(cur_df)
-            total_cost = cur_total_cost
-            total_time = max(cur_seg_time)
-            cost_dict = dict(cur_cost)
-            nndf.append((_df, cost_dict, total_time, cur_total_cost))
-        else:
-            for prev_nndf in prev_nndfs:
-                _df = OrderedDict()
-                _cd = OrderedDict()
-                prev_df, prev_cost, prev_total_time, prev_total_cost = prev_nndf
-                total_cost = prev_total_cost + cur_total_cost
-                total_time = prev_total_time + max(cur_seg_time)
-                _cd.update(prev_cost)
-                for key, value in cur_cost.items():
-                    _cd[key] = value + _cd.setdefault(key, 0)
-                _df.update(prev_df)
-                _df.update(cur_df)
-                nndf.append((_df, _cd, total_time, total_cost))
+def nn_rearrange(seg_no, seg_df, prev_nndf):
+    nndf_result = None
+    cur_df, cur_cost, cur_seg_time, nndf, cur_total_cost = seg_df
+    if prev_nndf is None:
+        _df = OrderedDict()
+        _df.update(cur_df)
+        total_cost = cur_total_cost
+        total_time = max(cur_seg_time)
+        cost_dict = dict(cur_cost)
+        return (_df, cost_dict, total_time, nndf, cur_total_cost)
+    else:
+        _df = OrderedDict()
+        _cd = OrderedDict()
+        prev_df, prev_cost, prev_total_time, prev_nndf, prev_total_cost = prev_nndf
+        total_cost = prev_total_cost + cur_total_cost
+        total_time = prev_total_time + max(cur_seg_time)
+        _cd.update(prev_cost)
+        for key, value in cur_cost.items():
+            _cd[key] = value + _cd.setdefault(key, 0)
+        _df.update(prev_df)
+        _df.update(cur_df)
 
-    return nndf
+        return (_df, _cd, total_time, nndf, total_cost)
+
+
+def part_workload(array_mapping, pdims, layer, batch_size):
+    workload = dict()
+    if array_mapping == ame.ROW_STATIONARY:
+        if isinstance(layer, (ConvLayer, LocalRegionLayer)):
+            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+            workload["Xo"] = util.idivc(layer.wofm, pdims[pe.OFMP].w)
+            workload["Yo"] = util.idivc(layer.hofm, pdims[pe.OFMP].h)
+            if isinstance(layer, ConvLayer):
+                workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+                workload["R"] = layer.wfil
+                workload["S"] = layer.hfil
+                workload["Xi"] = (workload["Xo"] - 1) * layer.wtrd + layer.wfil
+                workload["Yi"] = (workload["Yo"] - 1) * layer.htrd + layer.hfil
+            elif isinstance(layer, LocalRegionLayer):
+                workload["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+                workload["R"] = layer.wreg
+                workload["S"] = layer.hreg
+                workload["Xi"] = (workload["Xo"] - 1) * layer.wtrd + layer.wreg
+                workload["Yi"] = (workload["Yo"] - 1) * layer.htrd + layer.hreg
+        elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+            workload["Xi"] = util.idivc(layer.wifm, pdims[pe.IFMP].w)
+            workload["Yi"] = util.idivc(layer.hifm, pdims[pe.IFMP].h)
+            if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
+                workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+                workload["R"] = layer.wfil
+                workload["S"] = layer.hfil
+                workload["Xo"] = (workload["Xi"] - 1) * layer.wtrd + layer.wfil
+                workload["Yo"] = (workload["Yi"] - 1) * layer.htrd + layer.hfil
+            elif isinstance(layer, LocalRegionBackLayer):
+                workload["K"] = util.idivc(layer.nofm, pdims[pe.INPP].size())
+                workload["R"] = layer.wreg
+                workload["S"] = layer.hreg
+                workload["Xo"] = (workload["Xi"] - 1) * layer.wtrd + layer.wreg
+                workload["Yo"] = (workload["Yi"] - 1) * layer.htrd + layer.hreg
+        else:
+            raise TypeError("Unsupported layer type: {}".format(type(layer)))
+    elif array_mapping == ame.SYSTOLIC:
+        if isinstance(layer, (ConvLayer, LocalRegionLayer)):
+            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+            workload["XY"] = util.idivc(layer.wofm * layer.hofm, pdims[pe.OFMP].size())
+            if isinstance(layer, ConvLayer):
+                workload["F"] = layer.hfil * layer.wfil
+                workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+            elif isinstance(layer, LocalRegionLayer):
+                workload["F"] = layer.hreg * layer.wreg
+                workload["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+        else:
+            raise TypeError("unsupported layer type: {}".format(type(layer)))
+
+    return workload

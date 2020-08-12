@@ -27,7 +27,7 @@ from .. import util
 from .cost import Cost
 from .data_layout import DataLayout
 from .fmap_range import FmapPosition, FmapRange
-from .layer import Layer, ConvBackLayer, LocalRegionBackLayer
+from .layer import Layer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer
 from .map_strategy import MapStrategy
 from .resource import Resource
 from .scheduling_constraint import SchedulingConstraint
@@ -265,10 +265,9 @@ class Scheduling():
         # Partitioned layer.
         p_layer, p_batch_size, p_occ = part.part_layer(self.layer,
                                                        self.batch_size)
-
         # Mapping strategy.
         reverse_mapping = False
-        if isinstance(self.layer, (ConvBackLayer, LocalRegionBackLayer)):
+        if isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
             reverse_mapping = True
         map_strategy = self.map_strategy_class(p_layer, p_batch_size, p_occ,
                                                resource.dim_array,
@@ -301,15 +300,23 @@ class Scheduling():
         mem_nhops = [unh * f for unh, f
                      in zip(unit_nhops, lbs.get_top_level_fetch())]
         # Total hops = inter-node hops + memory hops.
-        total_nhops = [nnh for nnh in node_nhops]
-        # total_nhops = [nnh + mnh for nnh, mnh in zip(node_nhops, mem_nhops)]
+        # total_nhops = [nnh for nnh in node_nhops]
+        total_nhops = [nnh + mnh for nnh, mnh in zip(node_nhops, mem_nhops)]
         cost_noc = self.cost.noc_hop * sum(total_nhops)
+        cost_node_nhops = self.cost.noc_hop * sum(node_nhops)
+        cost_mem_nhops = self.cost.noc_hop * sum(mem_nhops)
 
         cost_op = self.cost.mac_op * lbs.ops
 
-        # --- Not count the op_cost & the static cost, since the two are nearly static.
-        # cost_static = self.cost.idl_unit * lbs.time
-        cost_static = 0
+        cost_static = self.cost.idl_unit * lbs.time
+        # cost_static = 0
+
+        # Calculate the categorical access.
+        access = lbs.get_access()
+        cost_dram = sum(access[me.DRAM]) * self.cost.mem_hier_at(me.DRAM)
+        cost_sram = sum(access[me.GBUF]) * self.cost.mem_hier_at(me.GBUF)
+        cost_itcn = sum(access[me.ITCN]) * self.cost.mem_hier_at(me.ITCN)
+        cost_regf = sum(access[me.REGF]) * self.cost.mem_hier_at(me.REGF)
 
         assert not math.isnan(cost_op + cost_access + cost_noc + cost_static)
 
@@ -321,7 +328,13 @@ class Scheduling():
         scheme['is_dram'] = (lbs.src_is_dram, lbs.dst_is_dram)
         scheme['cost_op'] = cost_op
         scheme['cost_access'] = cost_access
+        scheme['cost_dram'] = cost_dram
+        scheme['cost_sram'] = cost_sram
+        scheme['cost_itcn'] = cost_itcn
+        scheme['cost_regf'] = cost_regf
         scheme['cost_noc'] = cost_noc
+        scheme['cost_node_nhops'] = cost_node_nhops
+        scheme['cost_mem_nhops'] = cost_mem_nhops
         scheme['cost_static'] = cost_static
         scheme['proc_time'] = lbs.proc_time
         scheme['bus_time'] = lbs.bus_time

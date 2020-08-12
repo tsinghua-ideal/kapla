@@ -29,7 +29,8 @@ NESTED_LOOP_DESC_LIST = ['loopcnt',
                          'unit_ops',
                          'unit_time',
                          'data_loops',
-                         'regf_reusable'
+                         'regf_reusable',
+                         'rw_data'
                         ]
 
 class NestedLoopDesc(namedtuple('NestedLoopDesc', NESTED_LOOP_DESC_LIST)):
@@ -92,6 +93,9 @@ class NestedLoopDesc(namedtuple('NestedLoopDesc', NESTED_LOOP_DESC_LIST)):
             if not isinstance(rr, bool):
                 raise TypeError('NestedLoopDesc: element in regf_reusable '
                                 'must be a boolean value.')
+        if ntp.rw_data not in range(de.NUM):
+            raise TypeError('NestedLoopDesc: rw_data should be one of data type '
+                            'enum.')
 
         return ntp
 

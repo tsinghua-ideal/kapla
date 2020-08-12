@@ -2,6 +2,7 @@ from nn_dataflow import util
 from nn_dataflow.core import PhyDim2
 from nn_dataflow.parser.kapla_parse_utils import BL
 
+from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 
 NN_DIM_LIST = ["N", "C", "K", "F", "XY"]
 
@@ -51,7 +52,7 @@ class Systolic(object):
 
     def gen_unitpass(self):
         min_cnt_loops = float("inf")
-        if self.layer_type == 0:
+        if self.layer_type == lte.CONV:
             for fact_repl_h in util.factorize(self.repl.h, 2):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
@@ -92,7 +93,7 @@ class Systolic(object):
                     regf_unit_tensor["XY"] = 1
 
                     yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
-        elif self.layer_type == 1:
+        elif self.layer_type == lte.LOCAL:
             self.repls["N"] = min(self.repl.h * self.repl.w, self.workload["N"])
             lcnt = dict()
             for dim in NN_DIM_LIST:
@@ -120,6 +121,7 @@ class Systolic(object):
             regf_unit_tensor = dict()
             regf_unit_tensor["F"] = 1
             regf_unit_tensor["XY"] = 1
+            regf_unit_tensor["C"] = self.conv_strds[2]
 
             yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
 
@@ -129,7 +131,7 @@ class Systolic(object):
             usize[BL.REGF] = regf_unit_tensor
             usize[BL.GBUF] = gbuf_unit_tensor
 
-            if self.layer_type == 0:
+            if self.layer_type == lte.CONV:
                 regf_stacks = []
                 regf_stacks.append(("K", 1, "F", 1, self.logic_region.w))
                 regf_stacks.append(("XY", 1, "F", 1, self.logic_region.h))
@@ -146,7 +148,7 @@ class Systolic(object):
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
 
-            elif self.layer_type == 1:
+            elif self.layer_type == lte.LOCAL:
                 regf_stacks = []
                 regf_stacks.append(("K", 1, "F", 1, self.logic_region.w))
                 regf_stacks.append(("XY", 1, "F", 1, self.logic_region.h))
@@ -159,13 +161,13 @@ class Systolic(object):
                 regf_updates.append(("F", 1))
                 regf_updates = tuple(regf_updates)
 
-                unit_ops = 1
+                unit_ops = self.conv_strds[2]
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
 
     def get_unit_block(self):
         regf_repls = [self.repl.w, self.repl.h]
-        if self.layer_type == 0:
+        if self.layer_type == lte.CONV:
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1
@@ -194,7 +196,7 @@ class Systolic(object):
             base_updates.append(("F", 1))
 
             unit_ops = 1
-        elif self.layer_type == 1:
+        elif self.layer_type == lte.LOCAL:
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1
@@ -213,6 +215,7 @@ class Systolic(object):
             regf_unit_tensor = dict()
             regf_unit_tensor["F"] = 1
             regf_unit_tensor["XY"] = 1
+            regf_unit_tensor["C"] = self.conv_strds[2]
 
             base_stacks = []
             base_stacks.append(("K", 1, "F", 1, self.logic_region.w))
@@ -223,7 +226,7 @@ class Systolic(object):
             base_updates = []
             base_updates.append(("F", 1))
 
-            unit_ops = 1
+            unit_ops = self.conv_strds[2]
 
         return loopcnt, regf_repls, regf_unit_tensor, gbuf_unit_tensor, base_stacks, \
                base_updates, origin_stack_step_dict, unit_ops

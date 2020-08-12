@@ -22,7 +22,8 @@ from . import parallel_enum as pe
 from .. import util
 from .fmap_range import FmapPosition, FmapRange
 from .int_range import IntRange
-from .layer import ConvLayer, LocalRegionLayer, ConvBackLayer, LocalRegionBackLayer
+from .layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, \
+    ConvBackWeightLayer, LocalRegionBackLayer
 from .partition_scheme import PartitionScheme
 from .phy_dim2 import PhyDim2
 
@@ -65,14 +66,23 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
 
         if options.partition_hybrid:
             # Require partition is approximately dividable of total size.
-            if not util.approx_dividable(layer.nofm, pdims[pe.OUTP].size()):
-                continue
-            if not util.approx_dividable(layer.hofm, pdims[pe.OFMP].h) \
-                    or not util.approx_dividable(layer.wofm, pdims[pe.OFMP].w):
-                continue
+            if isinstance(layer, LocalRegionBackLayer):
+                if not util.approx_dividable(layer.nifm, pdims[pe.OUTP].size()):
+                    continue
+            else:
+                if not util.approx_dividable(layer.nofm, pdims[pe.OUTP].size()):
+                    continue
+            if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+                if not util.approx_dividable(layer.hifm, pdims[pe.OFMP].h) \
+                        or not util.approx_dividable(layer.wifm, pdims[pe.OFMP].w):
+                    continue
+            else:
+                if not util.approx_dividable(layer.hofm, pdims[pe.OFMP].h) \
+                        or not util.approx_dividable(layer.wofm, pdims[pe.OFMP].w):
+                    continue
             if (not options.partition_ifmaps) and pdims[pe.INPP].size() > 1:
                 continue
-            if isinstance(layer, (ConvLayer, ConvBackLayer)):
+            if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
                 if not util.approx_dividable(layer.nifm,
                                              pdims[pe.INPP].size()):
                     continue
@@ -83,8 +93,10 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
             assert not options.partition_ifmaps
             if pdims[pe.INPP].size() != 1:
                 continue
-
-            if layer.hofm == 1 and layer.wofm == 1:
+            if  (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer,
+                LocalRegionBackLayer)) and layer.hifm == 1 and layer.wifm == 1) or \
+                (isinstance(layer, (ConvLayer, LocalRegionLayer)) and \
+                layer.hofm == 1 and layer.wofm == 1):
                 # FC layer: no OFMP.
                 if pdims[pe.OFMP].size() != 1:
                     continue
@@ -149,7 +161,10 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
         pdims = [PhyDim2(1, 1)] * pe.NUM
         order = range(pe.NUM)
 
-        if layer.hofm == 1 and layer.wofm == 1:
+        if (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer,
+            LocalRegionBackLayer)) and layer.hifm == 1 and layer.wifm == 1) or \
+            (isinstance(layer, (ConvLayer, LocalRegionLayer)) and \
+            layer.hofm == 1 and layer.wofm == 1):
             # Only OUTP, no OFMP.
             pdims[pe.OUTP] = dim_nodes
         else:
@@ -202,7 +217,7 @@ def proc_data_range(layer, batch_size, part, pidx):
         w_beg, w_end = w_orng
         w_beg = w_beg * layer.wtrd
         w_end = max(w_beg, (w_end - 1) * layer.wtrd + layer.wfil)
-    elif isinstance(layer, ConvBackLayer):
+    elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
         # Ifmap channel partition.
         idx_ifm = pidx[pe.INPP].h * part.dim(pe.INPP).w + pidx[pe.INPP].w
         n_beg, n_end = util.get_ith_range((0, layer.nifm),
@@ -258,7 +273,7 @@ def proc_data_range(layer, batch_size, part, pidx):
 
     # Filter range.
 
-    if isinstance(layer, (ConvLayer, ConvBackLayer)):
+    if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
         filrng = (ifrng.beg_end('n'), ofrng.beg_end('n'))
     elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
         # No filter.

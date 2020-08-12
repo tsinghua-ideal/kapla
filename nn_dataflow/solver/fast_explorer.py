@@ -10,7 +10,7 @@ from nn_dataflow.core import mem_hier_enum as me
 from nn_dataflow.core import partition
 from nn_dataflow import util
 from nn_dataflow.core import BufShrScheme
-from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackLayer
+from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackActLayer, ConvBackWeightLayer
 from nn_dataflow.core.map_strategy import MapStrategyEyeriss
 from nn_dataflow.core import NodeRegion
 from nn_dataflow.core import PhyDim2
@@ -186,7 +186,7 @@ def _estimate_buf_ifm_ofm_lb(layer, buf_batch, resource):
     total_pe = resource.proc_region.dim.size() * resource.dim_array.size()
     if isinstance(layer, (ConvLayer, LocalRegionLayer)):
         layer_ops = layer.filter_size() * layer.ofmap_size(buf_batch)
-    elif isinstance(layer, (ConvBackLayer, LocalRegionBackLayer)):
+    elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
         layer_ops = layer.filter_size() * layer.ifmap_size(buf_batch)
     return max(1, total_pe // layer_ops)
 
@@ -205,7 +205,7 @@ def _estimate_layer_occp(layer, batch_size, resource, constraint):
                 layer.ifmap_size(buf_bat) * buf_ofm)
         return occp
 
-    elif isinstance(layer, (ConvLayer, ConvBackLayer)):
+    elif isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
         top_ifm_ofm_cands = []
 
         # This is an upper bound of the product of topifm and topofm.

@@ -188,7 +188,7 @@ class ConvLayer(Layer):
     htrd, wtrd (U): stride height/width
     '''
 
-    def __init__(self, nifm, nofm, sofm, sfil, strd=1):
+    def __init__(self, nifm, nofm, sofm, sfil, strd=1, rw_data=de.OFM):
         super(ConvLayer, self).__init__(nofm, sofm, strd=strd)
 
         if isinstance(sfil, int):
@@ -208,6 +208,7 @@ class ConvLayer(Layer):
         hifm = self.hfil + (self.hofm - 1) * self.htrd
         wifm = self.wfil + (self.wofm - 1) * self.wtrd
         self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = rw_data
 
     @staticmethod
     def data_loops():
@@ -281,7 +282,7 @@ class LocalRegionLayer(Layer):
     Includes pooling layer, normalization layer, and element-wise layer.
     '''
 
-    def __init__(self, nofm, sofm, nreg, sreg, ntrd=1, strd=1):
+    def __init__(self, nofm, sofm, nreg, sreg, ntrd=1, strd=1, rw_data=de.OFM):
         super(LocalRegionLayer, self).__init__(nofm, sofm, strd=strd)
 
         if isinstance(sreg, int):
@@ -307,6 +308,7 @@ class LocalRegionLayer(Layer):
         hifm = self.hreg + (self.hofm - 1) * self.htrd
         wifm = self.wreg + (self.wofm - 1) * self.wtrd
         self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = rw_data
 
     @staticmethod
     def data_loops():
@@ -389,13 +391,96 @@ class EltwiseLayer(LocalRegionLayer):
                 'nreg={}'.format(repr(self.nreg))]))
 
 
-class ConvBackLayer(Layer):
-    '''
-    NN convolutional layer in back-propagation.
-    '''
+# class ConvBackLayer(Layer):
+#     '''
+#     NN convolutional layer in back-propagation.
+#     '''
 
+#     def __init__(self, nifm, nofm, sofm, sfil, strd=1, crop=False, raw_sofm=None):
+#         super(ConvBackLayer, self).__init__(nofm, sofm, strd=strd)
+
+#         if isinstance(sfil, int):
+#             hfil = sfil
+#             wfil = sfil
+#         elif len(sfil) == 2:
+#             hfil = sfil[0]
+#             wfil = sfil[1]
+#         else:
+#             raise ValueError('ConvLayer: sfil is invalid ({}), '
+#                              'needs to be either one integer or '
+#                              'a pair of integers'.format(sfil))
+
+#         self.hfil = hfil
+#         self.wfil = wfil
+#         self.crop = crop
+#         if crop:
+#             if isinstance(raw_sofm, int):
+#                 hro = raw_sofm
+#                 wro = raw_sofm
+#             elif len(raw_sofm) == 2:
+#                 hro = raw_sofm[0]
+#                 wro = raw_sofm[1]
+#             else:
+#                 raise ValueError('ConvLayer: sfil is invalid ({}), '
+#                                  'needs to be either one integer or '
+#                                  'a pair of integers'.format(sfil))
+#             self.r_hofm = hro
+#             self.r_wofm = wro
+#             hifm = util.reverse_high(self.hofm-1, hro, self.hfil, self.htrd) + 1
+#             wifm = util.reverse_high(self.wofm-1, wro, self.wfil, self.wtrd) + 1
+#         else:
+#             hifm = (self.hofm - self.hfil) // self.htrd + 1
+#             wifm = (self.wofm - self.wfil) // self.wtrd + 1
+#         self.inlayer = Layer(nifm, (hifm, wifm))
+
+#     @staticmethod
+#     def data_loops():
+#         dls = [None] * de.NUM
+#         dls[de.FIL] = DataDimLoops(le.IFM, le.OFM)
+#         dls[de.IFM] = DataDimLoops(le.IFM, le.BAT)
+#         dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+#         return tuple(dls)
+
+#     def input_layer(self):
+#         return self.inlayer
+
+#     def total_ops(self, batch_size=1):
+#         return ConvLayer(self.nofm, self.nifm, (self.hifm, self.wifm),
+#                          (self.hfil, self.wfil), (self.htrd, self.wtrd)).total_ops(batch_size)
+
+#     def filter_size(self, word_size=1):
+#         '''
+#         Get size of one weight filter.
+
+#         If `word_size` is set to word byte size, return size in bytes.
+#         '''
+#         return self.hfil * self.wfil * word_size
+
+#     def total_filter_size(self, word_size=1):
+#         '''
+#         Get total size of all weight filters.
+
+#         If `word_size` is set to word byte size, return size in bytes.
+#         '''
+#         return self.nifm * self.nofm * self.filter_size(word_size)
+
+#     def __repr__(self):
+#         return '{}({})'.format(
+#             self.__class__.__name__,
+#             ', '.join([
+#                 'nifm={}'.format(repr(self.nifm)),
+#                 'nofm={}'.format(repr(self.nofm)),
+#                 'sofm={}'.format(repr((self.hofm, self.wofm))),
+#                 'sfil={}'.format(repr((self.hfil, self.wfil))),
+#                 'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+
+
+class ConvBackActLayer(Layer):
+    '''
+    NN convolutional activation layer in back-propagation.
+    '''
     def __init__(self, nifm, nofm, sofm, sfil, strd=1, crop=False, raw_sofm=None):
-        super(ConvBackLayer, self).__init__(nofm, sofm, strd=strd)
+        super(ConvBackActLayer, self).__init__(nofm, sofm, strd=strd)
 
         if isinstance(sfil, int):
             hfil = sfil
@@ -430,6 +515,7 @@ class ConvBackLayer(Layer):
             hifm = (self.hofm - self.hfil) // self.htrd + 1
             wifm = (self.wofm - self.wfil) // self.wtrd + 1
         self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = de.OFM
 
     @staticmethod
     def data_loops():
@@ -472,7 +558,115 @@ class ConvBackLayer(Layer):
                 'sfil={}'.format(repr((self.hfil, self.wfil))),
                 'strd={}'.format(repr((self.htrd, self.wtrd)))]))
 
-class FCBackLayer(ConvBackLayer):
+
+class ConvBackWeightLayer(Layer):
+    '''
+    NN convolutional weight layer in back-propagation.
+    '''
+    def __init__(self, nifm, nofm, sofm, sfil, strd=1, crop=False, raw_sofm=None):
+        super(ConvBackWeightLayer, self).__init__(nofm, sofm, strd=strd)
+
+        if isinstance(sfil, int):
+            hfil = sfil
+            wfil = sfil
+        elif len(sfil) == 2:
+            hfil = sfil[0]
+            wfil = sfil[1]
+        else:
+            raise ValueError('ConvLayer: sfil is invalid ({}), '
+                             'needs to be either one integer or '
+                             'a pair of integers'.format(sfil))
+
+        self.hfil = hfil
+        self.wfil = wfil
+        self.crop = crop
+        if crop:
+            if isinstance(raw_sofm, int):
+                hro = raw_sofm
+                wro = raw_sofm
+            elif len(raw_sofm) == 2:
+                hro = raw_sofm[0]
+                wro = raw_sofm[1]
+            else:
+                raise ValueError('ConvLayer: sfil is invalid ({}), '
+                                 'needs to be either one integer or '
+                                 'a pair of integers'.format(sfil))
+            self.r_hofm = hro
+            self.r_wofm = wro
+            hifm = util.reverse_high(self.hofm-1, hro, self.hfil, self.htrd) + 1
+            wifm = util.reverse_high(self.wofm-1, wro, self.wfil, self.wtrd) + 1
+        else:
+            hifm = (self.hofm - self.hfil) // self.htrd + 1
+            wifm = (self.wofm - self.wfil) // self.wtrd + 1
+        self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = de.FIL
+
+    @staticmethod
+    def data_loops():
+        dls = [None] * de.NUM
+        dls[de.FIL] = DataDimLoops(le.IFM, le.OFM)
+        dls[de.IFM] = DataDimLoops(le.IFM, le.BAT)
+        dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+        return tuple(dls)
+
+    def input_layer(self):
+        return self.inlayer
+
+    def total_ops(self, batch_size=1):
+        return ConvLayer(self.nofm, self.nifm, (self.hifm, self.wifm),
+                         (self.hfil, self.wfil), (self.htrd, self.wtrd)).total_ops(batch_size)
+
+    def filter_size(self, word_size=1):
+        '''
+        Get size of one weight filter.
+
+        If `word_size` is set to word byte size, return size in bytes.
+        '''
+        return self.hfil * self.wfil * word_size
+
+    def total_filter_size(self, word_size=1):
+        '''
+        Get total size of all weight filters.
+
+        If `word_size` is set to word byte size, return size in bytes.
+        '''
+        return self.nifm * self.nofm * self.filter_size(word_size)
+
+    def __repr__(self):
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join([
+                'nifm={}'.format(repr(self.nifm)),
+                'nofm={}'.format(repr(self.nofm)),
+                'sofm={}'.format(repr((self.hofm, self.wofm))),
+                'sfil={}'.format(repr((self.hfil, self.wfil))),
+                'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+
+# class FCBackLayer(ConvBackLayer):
+#     '''
+#     NN fully-connected layer parameters.
+
+#     As a special case of CONVLayer.
+
+#     hifm = hfil, wifm = wfil, strd = 1, hifm = wifm = 1
+#     '''
+
+#     def __init__(self, nifm, nofm, sfil=1):
+#         super(FCBackLayer, self).__init__(nifm, nofm, sfil, sfil)
+#         assert self.hifm == 1 and self.wifm == 1
+
+#     def __repr__(self):
+#         return '{}({})'.format(
+#             self.__class__.__name__,
+#             ', '.join([
+#                 'nifm={}'.format(repr(self.nifm)),
+#                 'nofm={}'.format(repr(self.nofm)),
+#                 'sifm={}'.format(repr((self.hifm, self.wifm))),
+#                 'sofm={}'.format(repr((self.hofm, self.wofm))),
+#                 'sfil={}'.format(repr((self.hfil, self.wfil)))]))
+
+
+class FCBackActLayer(ConvBackActLayer):
     '''
     NN fully-connected layer parameters.
 
@@ -482,7 +676,7 @@ class FCBackLayer(ConvBackLayer):
     '''
 
     def __init__(self, nifm, nofm, sfil=1):
-        super(FCBackLayer, self).__init__(nifm, nofm, sfil, sfil)
+        super(FCBackActLayer, self).__init__(nifm, nofm, sfil, sfil)
         assert self.hifm == 1 and self.wifm == 1
 
     def __repr__(self):
@@ -494,6 +688,31 @@ class FCBackLayer(ConvBackLayer):
                 'sifm={}'.format(repr((self.hifm, self.wifm))),
                 'sofm={}'.format(repr((self.hofm, self.wofm))),
                 'sfil={}'.format(repr((self.hfil, self.wfil)))]))
+
+
+class FCBackWeightLayer(ConvBackWeightLayer):
+    '''
+    NN fully-connected layer parameters.
+
+    As a special case of CONVLayer.
+
+    hifm = hfil, wifm = wfil, strd = 1, hifm = wifm = 1
+    '''
+
+    def __init__(self, nifm, nofm, sfil=1):
+        super(FCBackWeightLayer, self).__init__(nifm, nofm, sfil, sfil)
+        assert self.hifm == 1 and self.wifm == 1
+
+    def __repr__(self):
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join([
+                'nifm={}'.format(repr(self.nifm)),
+                'nofm={}'.format(repr(self.nofm)),
+                'sifm={}'.format(repr((self.hifm, self.wifm))),
+                'sofm={}'.format(repr((self.hofm, self.wofm))),
+                'sfil={}'.format(repr((self.hfil, self.wfil)))]))
+
 
 class LocalRegionBackLayer(Layer):
     '''
@@ -533,8 +752,8 @@ class LocalRegionBackLayer(Layer):
             else:
                 raise ValueError('ConvLayer: sfil is invalid ({}), '
                                  'needs to be either one integer or '
-                                 'a pair of integers'.format(sfil))
-            assert(isinstance(raw_nofm, int))
+                                 'a pair of integers'.format(raw_sofm))
+            assert isinstance(raw_nofm, int), 'invalid raw_nofm: {}'.format(raw_nofm)
             nifm = util.reverse_high(self.nofm-1, raw_nofm, self.nreg, self.ntrd) + 1
             hifm = util.reverse_high(self.hofm-1, hro, self.hreg, self.htrd) + 1
             wifm = util.reverse_high(self.wofm-1, wro, self.wreg, self.wtrd) + 1
@@ -544,6 +763,7 @@ class LocalRegionBackLayer(Layer):
             wifm = (self.wofm - self.wreg) // self.wtrd + 1
 
         self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = de.OFM
 
     @staticmethod
     def data_loops():
