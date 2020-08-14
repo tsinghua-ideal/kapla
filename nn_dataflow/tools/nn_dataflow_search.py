@@ -69,10 +69,14 @@ def stats_dict(dfsch, cost):
 
     total_access = [0 for _ in range(me.NUM)]
     total_rmt_gbuf_acc = 0
+    total_mem_hop_cost = 0
+    total_node_hop_cost = 0
     for sr in dfsch.values():
         for m in range(me.NUM):
             total_access[m] += sum(sr.scheme["access"][m])
         total_rmt_gbuf_acc += sum(sr.scheme["remote_gbuf_access"])
+        total_node_hop_cost += sr.scheme["cost_node_nhops"]
+        total_mem_hop_cost += sr.scheme["cost_mem_nhops"]
     access_cost = tuple(c * a for c, a in zip(cost.mem_hier, total_access))
     remote_gbuf_access_cost = total_rmt_gbuf_acc * cost.mem_hier_at(me.GBUF)
     stats['total_dram_cost'] = access_cost[me.DRAM]
@@ -80,7 +84,8 @@ def stats_dict(dfsch, cost):
     stats['total_itcn_cost'] = access_cost[me.ITCN]
     stats['total_regf_cost'] = access_cost[me.REGF]
     stats['total_rmt_gbuf_cost'] = remote_gbuf_access_cost
-
+    stats['total_node_hops_cost'] = total_node_hop_cost
+    stats['total_mem_hops_cost'] = total_mem_hop_cost
     stats['total_op_cost'] = total_op_cost
     stats['total_access_cost'] = total_access_cost
     stats['total_noc_cost'] = total_noc_cost

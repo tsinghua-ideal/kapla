@@ -12,3 +12,9 @@ settings.json
 
 # Log related.
 *.log
+
+bp_collection/
+systolic_collection/
+row_stationary_collection/
+
+nndf_collect/

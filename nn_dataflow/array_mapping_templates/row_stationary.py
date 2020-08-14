@@ -142,6 +142,7 @@ class RowStationary(object):
                     if self.workload["R"] > 1:
                         regf_unit_tensor["Xi"] = self.workload["R"]
                         regf_unit_tensor["Yi"] = 1
+                        regf_unit_tensor["R"] = self.workload["R"]
                     # reduction across channel.
                     else:
                         regf_unit_tensor["Xi"] = 1
@@ -237,6 +238,7 @@ class RowStationary(object):
                     if self.workload["R"] > 1:
                         regf_unit_tensor["Xo"] = self.workload["R"]
                         regf_unit_tensor["Yo"] = 1
+                        regf_unit_tensor["R"] = self.workload["R"]
                     # reduction across channel.
                     else:
                         regf_unit_tensor["Xo"] = 1

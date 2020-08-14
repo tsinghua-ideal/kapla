@@ -14,8 +14,7 @@ from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import SystolicTensorDimMap
 
 class KaplaCostModel():
-    def __init__(self, network, tensor_dim_map):
-        self.network = network
+    def __init__(self, tensor_dim_map):
         self.tdm = tensor_dim_map
 
     def set_cur_layer_type(self, layer_type):
@@ -507,7 +506,7 @@ class KaplaCostModel():
 
         return inter_layer_dist
 
-    def seg_time_estimation(self, segment, seg_times, real_cstr_dict):
+    def seg_time_estimation(self, network, segment, seg_times, real_cstr_dict):
         bat_ngrp = 0
         ifm_ngrp = 0
         ofm_ngrp = 0
@@ -523,7 +522,7 @@ class KaplaCostModel():
                 proc_t, dram_t, bus_t = times
                 layer_t = max(proc_t, dram_t, bus_t)
                 dram_time += dram_t
-                is_conv = isinstance(self.network[layer_name],
+                is_conv = isinstance(network[layer_name],
                     (ConvLayer, ConvBackActLayer, ConvBackWeightLayer))
                 real_cstr = real_cstr_dict[layer_name]
                 if not bat_ngrp:
@@ -534,7 +533,7 @@ class KaplaCostModel():
                 ifm_ngrp, ofm_ngrp = real_cstr.topifm, real_cstr.topofm
                 ts_xb = 0
                 td_xb = 0
-                for p in self.network.prevs(layer_name):
+                for p in network.prevs(layer_name):
                     if p not in seg_layer_idx:
                         continue
                     p_sp_idx, p_tm_idx = seg_layer_idx[p]

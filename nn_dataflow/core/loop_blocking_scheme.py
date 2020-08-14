@@ -135,7 +135,7 @@ class LoopBlockingScheme():
                 or self.data_size(BL.GBUF) > resource.size_gbuf:
             self.valid = False
             # print("!Invalid 0: regf: ds {}, resource {} gbuf: ds {}, resource {}".format(
-                #   self.data_size(BL.REGF), resource.size_regf, self.data_size(BL.GBUF), resource.size_gbuf))
+            #       self.data_size(BL.REGF), resource.size_regf, self.data_size(BL.GBUF), resource.size_gbuf))
             return
         self.valid = True
 

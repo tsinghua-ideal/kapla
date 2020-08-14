@@ -1,4 +1,5 @@
 import json
+import itertools
 from collections import namedtuple, OrderedDict
 
 from nn_dataflow.core import PhyDim2, NodeRegion, Resource, Option, Cost
@@ -8,8 +9,10 @@ import nn_dataflow.core.loop_enum as le
 from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, \
     LocalRegionLayer, LocalRegionBackLayer
 from nn_dataflow import util
+
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ParallelEnum as pe
+from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 
 class BL():
     '''
@@ -227,57 +230,159 @@ def nn_rearrange(seg_no, seg_df, prev_nndf):
         return (_df, _cd, total_time, nndf, total_cost)
 
 
-def part_workload(array_mapping, pdims, layer, batch_size):
-    workload = dict()
+def part_workload(array_mapping, part, layer, batch_size):
+    pdims = part.pdims
+    layer_tensor = dict()
     if array_mapping == ame.ROW_STATIONARY:
         if isinstance(layer, (ConvLayer, LocalRegionLayer)):
-            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
-            workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
-            workload["Xo"] = util.idivc(layer.wofm, pdims[pe.OFMP].w)
-            workload["Yo"] = util.idivc(layer.hofm, pdims[pe.OFMP].h)
+            layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+            layer_tensor["Xo"] = util.idivc(layer.wofm, pdims[pe.OFMP].w)
+            layer_tensor["Yo"] = util.idivc(layer.hofm, pdims[pe.OFMP].h)
             if isinstance(layer, ConvLayer):
-                workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
-                workload["R"] = layer.wfil
-                workload["S"] = layer.hfil
-                workload["Xi"] = (workload["Xo"] - 1) * layer.wtrd + layer.wfil
-                workload["Yi"] = (workload["Yo"] - 1) * layer.htrd + layer.hfil
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+                layer_tensor["R"] = layer.wfil
+                layer_tensor["S"] = layer.hfil
+                layer_tensor["Xi"] = (layer_tensor["Xo"] - 1) * layer.wtrd + layer.wfil
+                layer_tensor["Yi"] = (layer_tensor["Yo"] - 1) * layer.htrd + layer.hfil
             elif isinstance(layer, LocalRegionLayer):
-                workload["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
-                workload["R"] = layer.wreg
-                workload["S"] = layer.hreg
-                workload["Xi"] = (workload["Xo"] - 1) * layer.wtrd + layer.wreg
-                workload["Yi"] = (workload["Yo"] - 1) * layer.htrd + layer.hreg
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+                layer_tensor["R"] = layer.wreg
+                layer_tensor["S"] = layer.hreg
+                layer_tensor["Xi"] = (layer_tensor["Xo"] - 1) * layer.wtrd + layer.wreg
+                layer_tensor["Yi"] = (layer_tensor["Yo"] - 1) * layer.htrd + layer.hreg
         elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
-            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
-            workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
-            workload["Xi"] = util.idivc(layer.wifm, pdims[pe.IFMP].w)
-            workload["Yi"] = util.idivc(layer.hifm, pdims[pe.IFMP].h)
+            layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+            layer_tensor["Xi"] = util.idivc(layer.wifm, pdims[pe.OFMP].w)
+            layer_tensor["Yi"] = util.idivc(layer.hifm, pdims[pe.OFMP].h)
             if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
-                workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
-                workload["R"] = layer.wfil
-                workload["S"] = layer.hfil
-                workload["Xo"] = (workload["Xi"] - 1) * layer.wtrd + layer.wfil
-                workload["Yo"] = (workload["Yi"] - 1) * layer.htrd + layer.hfil
+                layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+                layer_tensor["R"] = layer.wfil
+                layer_tensor["S"] = layer.hfil
+                layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wfil
+                layer_tensor["Yo"] = (layer_tensor["Yi"] - 1) * layer.htrd + layer.hfil
             elif isinstance(layer, LocalRegionBackLayer):
-                workload["K"] = util.idivc(layer.nofm, pdims[pe.INPP].size())
-                workload["R"] = layer.wreg
-                workload["S"] = layer.hreg
-                workload["Xo"] = (workload["Xi"] - 1) * layer.wtrd + layer.wreg
-                workload["Yo"] = (workload["Yi"] - 1) * layer.htrd + layer.hreg
+                layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.INPP].size())
+                layer_tensor["R"] = layer.wreg
+                layer_tensor["S"] = layer.hreg
+                layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wreg
+                layer_tensor["Yo"] = (layer_tensor["Yi"] - 1) * layer.htrd + layer.hreg
         else:
             raise TypeError("Unsupported layer type: {}".format(type(layer)))
     elif array_mapping == ame.SYSTOLIC:
         if isinstance(layer, (ConvLayer, LocalRegionLayer)):
-            workload["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
-            workload["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
-            workload["XY"] = util.idivc(layer.wofm * layer.hofm, pdims[pe.OFMP].size())
+            layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
+            layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+            layer_tensor["XY"] = util.idivc(layer.wofm * layer.hofm, pdims[pe.OFMP].size())
             if isinstance(layer, ConvLayer):
-                workload["F"] = layer.hfil * layer.wfil
-                workload["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
+                layer_tensor["F"] = layer.hfil * layer.wfil
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
             elif isinstance(layer, LocalRegionLayer):
-                workload["F"] = layer.hreg * layer.wreg
-                workload["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+                layer_tensor["F"] = layer.hreg * layer.wreg
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
         else:
-            raise TypeError("unsupported layer type: {}".format(type(layer)))
+            raise TypeError("Unsupported layer type: {}".format(type(layer)))
 
-    return workload
+    return layer_tensor
+
+
+def construct_stack(array_mapping, layer_type, part, workload):
+    stacks = []
+
+    if layer_type in (lte.CONV, lte.LOCAL):
+        for pae in reversed(part.order):
+            pdim = part.pdims[pae]
+            if pae == pe.OUTP:
+                if layer_type == lte.CONV:
+                    if pdim.w != 1:
+                        stacks.append(("K", workload["K"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("K", pdim.w * workload["K"], pdim.h))
+                elif layer_type == lte.LOCAL:
+                    if pdim.w != 1:
+                        stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
+            elif pae == pe.INPP:
+                if pdim.w != 1:
+                    stacks.append(("C", workload["C"], pdim.w))
+                if pdim.h != 1:
+                    stacks.append(("C", pdim.w * workload["C"], pdim.h))
+            elif pae == pe.BATP:
+                if pdim.w != 1:
+                    stacks.append(("N", workload["N"], pdim.w))
+                if pdim.h != 1:
+                    stacks.append(("N", pdim.w * workload["N"], pdim.h))
+            elif pae == pe.OFMP:
+                if array_mapping == ame.ROW_STATIONARY:
+                    if pdim.w != 1:
+                        stacks.append(("Xo", workload["Xo"], "Xi", workload["Xi"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("Yo", workload["Yo"], "Yi", workload["Yi"], pdim.h))
+                elif array_mapping == ame.SYSTOLIC:
+                    if pdim.w != 1:
+                        stacks.append(("XY", workload["XY"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("XY", workload["XY"] * pdim.w, pdim.h))
+    elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+        if array_mapping == ame.SYSTOLIC:
+            raise TypeError("SYSTOLIC not supports back-prop layer.")
+        for pae in reversed(part.order):
+            pdim = part.pdims[pae]
+            if pae == pe.OUTP:
+                if pdim.w != 1:
+                    stacks.append(("K", workload["K"], pdim.w))
+                if pdim.h != 1:
+                    stacks.append(("K", pdim.w * workload["K"], pdim.h))
+            elif pae == pe.INPP:
+                if layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
+                    if pdim.w != 1:
+                        stacks.append(("C", workload["C"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("C", pdim.w * workload["C"], pdim.h))
+                elif layer_type == lte.LOCAL_BACK_H:
+                    if pdim.w != 1:
+                        stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
+            elif pae == pe.BATP:
+                if pdim.w != 1:
+                    stacks.append(("N", workload["N"], pdim.w))
+                if pdim.h != 1:
+                    stacks.append(("N", pdim.w * workload["N"], pdim.h))
+            elif pae == pe.IFMP:
+                if pdim.w != 1:
+                    stacks.append(("Xo", workload["Xo"], "Xi", workload["Xi"], pdim.w))
+                if pdim.h != 1:
+                    stacks.append(("Yo", workload["Yo"], "Yi", workload["Yi"], pdim.h))
+    stacks = tuple(stacks)
+
+    return stacks
+
+
+def layer_rearrange(tdm, layer_type, gbuf_tensor_dims, gbuf_stack, gbuf_update, regf_tensor_dims,
+                    regf_stack, regf_update, buf_sharing):
+    layer_df = dict()
+    gbuf_df = dict()
+    gbuf_df['tensor_w'] = {dim: gbuf_tensor_dims[dim] for dim in tdm.data_list[de.FIL]}
+    gbuf_df['tensor_i'] = {dim: gbuf_tensor_dims[dim] for dim in tdm.data_list[de.IFM]}
+    gbuf_df['tensor_o'] = {dim: gbuf_tensor_dims[dim] for dim in tdm.data_list[de.OFM]}
+    gbuf_df['stack'] = gbuf_stack
+    gbuf_df['update'] = gbuf_update
+
+    gbuf_df['tensor_i']['buf_sharing'] = buf_sharing.size(de.IFM) > 1
+    gbuf_df['tensor_w']['buf_sharing'] = buf_sharing.size(de.FIL) > 1
+    gbuf_df['tensor_o']['buf_sharing'] = buf_sharing.size(de.OFM) > 1
+
+    regf_df = dict()
+    regf_df['tensor_w'] = {dim: regf_tensor_dims[dim] for dim in tdm.data_list[de.FIL]}
+    regf_df['tensor_i'] = {dim: regf_tensor_dims[dim] for dim in tdm.data_list[de.IFM]}
+    regf_df['tensor_o'] = {dim: regf_tensor_dims[dim] for dim in tdm.data_list[de.OFM]}
+    regf_df['stack'] = regf_stack
+    regf_df['update'] = regf_update
+
+    layer_df['GBUF'] = gbuf_df
+    layer_df['REGF'] = regf_df
+
+    return layer_df

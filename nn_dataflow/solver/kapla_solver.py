@@ -58,7 +58,7 @@ class KaplaSolver():
         else:
             raise ValueError("No corresponding dim map: {}".format(array_mapping))
 
-        self.cost_model = KaplaCostModel(network, self.tdm)
+        self.cost_model = KaplaCostModel(self.tdm)
 
     def solve_dataflow(self):
         df_tops = defaultdict(lambda: None)
@@ -141,6 +141,22 @@ class KaplaSolver():
         cstr_collections = dict()
         seg_costs = dict()
         total_cost = 0
+
+        # Forwarding data regions. Map a spatial index to the forwarding region.
+        fwd_data_region_dict = {}
+        for sh_list in segment.ifm_fwd_dict.values():
+            # A list of spatial indices that share the same ifmaps.
+            r = allocation[sh_list[0].sp_idx][sh_list[0].tm_idx].proc_region
+            for idx in sh_list[1:]:
+                fwd_data_region_dict[idx] = r
+        for fwd_src, fwd_dst_list in segment.ofm_fwd_dict.items():
+            # Ofmaps forwarded to neighbors.
+            r = allocation[fwd_src.sp_idx][fwd_src.tm_idx].proc_region
+            for idx in fwd_dst_list:
+                fwd_data_region_dict[idx] = r
+
+        seg_idx = cur_nndf.last_seg_idx + 1
+
         for sp_idx, (ltpl, rtpl, ctpl) in enumerate(zip(segment, allocation, constraint)):
             seg_times.append([])
             for tm_idx, (layer_name, resource, cstr) in enumerate(zip(ltpl, rtpl, ctpl)):
@@ -154,8 +170,18 @@ class KaplaSolver():
                     topofm = cstr_collections[prev_layer].topofm
                 cur_cstr = SimpleCstr(topbat, topifm, topofm)
 
-                df, real_cstr, cost_dict, layer_time, sched_vars = self.solve_layer_df(layer, cur_cstr, resource, \
-                    sp_idx, tm_idx)
+                ifmap_layout = cur_nndf.fmap_layout(self.network.prevs(layer_name))
+                fwd_data_region = fwd_data_region_dict.get((sp_idx, tm_idx))
+                if fwd_data_region is not None:
+                    # Remap source data regions to the forwarding region.
+                    ifmap_layout = DataLayout(
+                        frngs=ifmap_layout.frngs,
+                        regions=(fwd_data_region,) * len(ifmap_layout.frngs),
+                        parts=tuple(p.projection(fwd_data_region, appl2frng=True)
+                                    for p in ifmap_layout.parts))
+
+                df, real_cstr, cost_dict, layer_time, sched_vars = self.solve_layer_df(layer_name, cur_cstr, resource, \
+                    sp_idx, tm_idx, ifmap_layout)
                 if df is None:
                     return dict(), None, None, None, None
                 print("layer: {}".format(layer_name))
@@ -163,8 +189,8 @@ class KaplaSolver():
                 print("cost: {}".format(sum(cost_dict.values())))
                 print("time: {}".format(layer_time))
                 print("---")
-                sched_result = self.derive_sched_result(layer_name, sp_idx, tm_idx,
-                    resource, cur_nndf, sched_vars)
+                sched_result = self.derive_sched_result(layer_name, seg_idx, sp_idx, tm_idx,
+                    resource, ifmap_layout, sched_vars)
                 print("sched_result", sched_result)
                 cur_nndf[layer_name] = sched_result
 
@@ -176,12 +202,13 @@ class KaplaSolver():
                 seg_times[sp_idx].append(layer_time)
                 total_cost += sum(cost_dict.values())
 
-        seg_time = self.cost_model.seg_time_estimation(segment, seg_times, cstr_collections)
+        seg_time = self.cost_model.seg_time_estimation(self.network, segment, seg_times, cstr_collections)
         print("* cur_nndf")
         print(cur_nndf)
         return seg_df, seg_costs, seg_time, cur_nndf, total_cost
 
-    def solve_layer_df(self, layer, cstr, resource, sp_idx, tm_idx):
+    @functools.lru_cache(maxsize=1024)
+    def solve_layer_df(self, layer_name, cstr, resource, sp_idx, tm_idx, ifmap_layout):
         min_cost = float("inf")
         min_cost_dict = dict()
         min_layer_time = float("inf")
@@ -189,6 +216,7 @@ class KaplaSolver():
         layer_cand = None
         min_sched_var = None
 
+        layer = self.network[layer_name]
         layer_type = ident_layer_type(layer)
         conv_strds = get_conv_strds(layer_type, layer)
         self.cost_model.set_cur_layer_type(layer_type)
@@ -389,6 +417,25 @@ class KaplaSolver():
             for gbuf_stack in gbuf_stack_repl_dict:
                 gbuf_stack_num *= util.prod(gbuf_stack.values())
 
+            part = self.derive_nndf_partition(layer_type, gbuf_stack_repl_dict, gbuf_stacks)
+
+            # Filter nodes. All memory nodes can store filters. Deduplicate.
+            filter_nodes = frozenset(resource.dram_region.iter_node())
+            # Ofmap layout.
+            ofmap_range = FmapRange(
+                FmapPosition(b=0, n=0, h=0, w=0),
+                FmapPosition(b=self.batch_size, n=layer.nofm,
+                             h=layer.hofm, w=layer.wofm))
+            ofmap_data_region = resource.dst_data_region
+            ofmap_layout = DataLayout(
+                frngs=(ofmap_range,),
+                regions=(ofmap_data_region,),
+                parts=(part.projection(ofmap_data_region, appl2frng=True),))
+            # Partition NoC hop cost.
+            unit_nhops = partition.unit_nhops_to_proc_region(
+                layer, self.batch_size, resource.proc_region, part,
+                filter_nodes, ifmap_layout, ofmap_layout, self.options)
+
             print("")
             print("layer")
             print(layer)
@@ -444,7 +491,7 @@ class KaplaSolver():
                             regf_stacks, regf_workload, len(regf_base_updates),
                             frozenset(gbuf_unit_tensor.items()), gbuf_updates, gbuf_stacks,
                             gbuf_workload, regf_ops_iter, regf_stack_num, gbuf_stack_num,
-                            unit_ops, conv_strds, resource)
+                            unit_ops, tuple(unit_nhops), conv_strds, resource)
 
             print("access_result:")
             print(accesses_result)
@@ -1219,10 +1266,10 @@ class KaplaSolver():
 
         return tuple(stacks)
 
-
+    @functools.lru_cache(maxsize=1024)
     def get_ldf_cost(self, layer_type, regf_froz_tensor, regf_updates, regf_stacks, regf_workload,
                      regf_base_upd_num, gbuf_froz_tensor, gbuf_updates, gbuf_stacks, gbuf_workload,
-                     regf_ops_iter, regf_stack_num, gbuf_stack_num, unit_ops, conv_strds, resource):
+                     regf_ops_iter, regf_stack_num, gbuf_stack_num, unit_ops, unit_nhops, conv_strds, resource):
         regf_unit_tensor = dict(regf_froz_tensor)
         gbuf_unit_tensor = dict(gbuf_froz_tensor)
 
@@ -1301,7 +1348,10 @@ class KaplaSolver():
         accesses_result[me.DRAM] = dram_accesses
         accesses_result[me.GBUF] = gbuf_accesses
         accesses_result[me.ITCN] = itcn_accesses
-        noc_hops = [fwd_hop + bufshr_hop for fwd_hop, bufshr_hop in zip(fwd_hops, buf_shr_hops)]
+
+        node_hops = [fwd_hop + bufshr_hop for fwd_hop, bufshr_hop in zip(fwd_hops, buf_shr_hops)]
+        mem_hops = [unh * f for unh, f in zip(unit_nhops, g_rd_iters)]
+        noc_hops = [nnh + mnh for nnh, mnh in zip(node_hops, mem_hops)]
 
         print("g_init_datas:")
         print(g_init_datas)
@@ -1348,7 +1398,8 @@ class KaplaSolver():
         cost_dict["regf_cost"] = sum(accesses_result[me.REGF]) * self.unit_cost.mem_hier_at(me.REGF)
 
         cost_dict["remote_sram_cost"] = self.unit_cost.mem_hier_at(me.GBUF) * sum(remote_gbuf_access)
-        cost_dict["noc_cost"] = sum(noc_hops) * self.unit_cost.noc_hop
+        cost_dict["node_hop_cost"] = sum(node_hops) * self.unit_cost.noc_hop
+        cost_dict["mem_hop_cost"] = sum(mem_hops) * self.unit_cost.noc_hop
         cost_dict["op_cost"] = nndf_ops * self.unit_cost.mac_op
 
         # calculate the time
@@ -1383,7 +1434,7 @@ class KaplaSolver():
 
         return layer_df
 
-    def derive_sched_result(self, layer_name, sp_idx, tm_idx, resource, cur_nndf, sched_vars):
+    def derive_sched_result(self, layer_name, seg_idx, sp_idx, tm_idx, resource, ifmap_layout, sched_vars):
         (layer_type, layer, gbuf_stacks, mapping,
             conv_strds,
             regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
@@ -1391,8 +1442,6 @@ class KaplaSolver():
 
         proc_region = resource.proc_region
         part = self.derive_nndf_partition(layer_type, gbuf_stack_repl_dict, gbuf_stacks)
-
-        ifmap_layout = cur_nndf.fmap_layout(self.network.prevs(layer_name))
 
         # Ofmap layout.
         ofmap_range = FmapRange(
@@ -1415,10 +1464,7 @@ class KaplaSolver():
             gbuf_stack_repl_dict, regf_tensor_repl_dict, regf_stack_repl_dict, conv_strds, bl_ords, unit_ops, resource,
             bufshr)
 
-        segment_idx = cur_nndf.last_seg_idx
-        if sp_idx == 0 and tm_idx == 0:
-            segment_idx += 1
-        sched_seq = (segment_idx, sp_idx, tm_idx)
+        sched_seq = (seg_idx, sp_idx, tm_idx)
 
         sched_result = self._construct_sched_result(lbs, part, ofmap_layout, sched_seq, unit_nhops)
 
@@ -1575,14 +1621,22 @@ class KaplaSolver():
             unit_access = [[float('nan')] * de.NUM for _ in range(me.NUM)]
             regf_reusable = [False for _ in range(de.NUM)]
 
-            unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["K"] * regf_stacks["N"]
-
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            if layer_type == lte.CONV:
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["K"] * regf_stacks["N"]
                 unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * regf_stacks["C"] * regf_stacks["K"]
                 unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["C"] * regf_stacks["N"] / amp_acc_ifm
-            elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["C"] * regf_stacks["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * regf_stacks["C"] * regf_stacks["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["K"] * regf_stacks["N"] / amp_acc_ifm
+            elif layer_type == lte.LOCAL:
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["K"] * regf_stacks["N"]
                 unit_access[me.DRAM][de.FIL] = 0
                 unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["K"] * regf_stacks["N"] / amp_acc_ifm
+            elif layer_type == lte.LOCAL_BACK_H:
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["C"] * regf_stacks["N"]
+                unit_access[me.DRAM][de.FIL] = 0
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["C"] * regf_stacks["N"] / amp_acc_ifm
 
             unit_access[me.GBUF][de.FIL] = unit_access[me.DRAM][de.FIL]
             unit_access[me.GBUF][de.IFM] = unit_access[me.DRAM][de.IFM] * flpesets_per_unitpass
@@ -1927,6 +1981,13 @@ def solve_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, back_prop=
         sys.exit(0)
 
     df, cost, total_time, nndf, total_cost = df_top
+
+    print("*---------------*")
+    print("Network: {}".format(network.net_name))
+    print("batch_size: {}".format(batch_size))
+    print("{}".format("EYERISS" if array_mapping == ame.ROW_STATIONARY else "SYSTOLIC"))
+    print("nprocess: {}".format(options.nprocesses))
+
     print("*-* Kapla:")
     for key, value in df.items():
         pp.pprint(key)
@@ -2012,7 +2073,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # run_row_stationary()
-    # run_back_prop()
-    # run_systolic()
     sys.exit(main())
