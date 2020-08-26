@@ -108,9 +108,8 @@ class KaplaSolver():
 
                 for constraint, hints in self.solve_constraint(seg):
 
-                    Filter out off-frontier constraints.
-                    if any(all(h >= fh for h, fh in zip(hints, fhints))
-                        for fhints in frontier):
+                    # Filter out off-frontier constraints.
+                    if any(all(h >= fh for h, fh in zip(hints, fhints)) for fhints in frontier):
                         continue
 
                     print("-- constraint: {}".format(constraint))
