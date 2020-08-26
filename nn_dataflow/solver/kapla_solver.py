@@ -48,8 +48,8 @@ class KaplaSolver():
         self.ntops = ntops
 
         self.ilp = InterLayerPipeline(network, batch_size, resource)
-        self.priored_segments = self.solve_priortize_segment()
         self.ordered_layer_list = self.ilp.ordered_layer_list()
+        self.priored_segments = self.solve_priortize_segment()
 
         if array_mapping == ame.ROW_STATIONARY:
             self.tdm = RSTensorDimMap()
@@ -104,7 +104,15 @@ class KaplaSolver():
                     for idx in fwd_dst_list:
                         fwd_data_region_dict[idx] = r
 
-                for constraint, _ in self.solve_constraint(seg):
+                frontier = set()
+
+                for constraint, hints in self.solve_constraint(seg):
+
+                    Filter out off-frontier constraints.
+                    if any(all(h >= fh for h, fh in zip(hints, fhints))
+                        for fhints in frontier):
+                        continue
+
                     print("-- constraint: {}".format(constraint))
                     cur_nndf = prev_nndf.copy()
                     seg_df, cost_dict, seg_time, cur_nndf, total_cost = self.solve_segment_df(seg, allocation, constraint, cur_nndf)
@@ -113,6 +121,9 @@ class KaplaSolver():
                         continue
                     print("** cur_nndf:")
                     print(cur_nndf)
+
+                    frontier.add(hints)
+
                     seg_dfs.append((seg_df, cost_dict, seg_time, cur_nndf, total_cost))
 
                 # Select best seg df.
@@ -248,23 +259,6 @@ class KaplaSolver():
             gbuf_unit_tensor = copy.deepcopy(origin_gbuf_unit_tensor)
             regf_repls = [r for r in origin_regf_repls]
 
-
-            # first fit as much as possible into regfile to reduce gbuf access.
-            froz_remain_lcnt, froz_regf_unit_tensor, froz_regf_tensor_repl_dict = \
-                self.fill_regf_tensor(layer_type,
-                    conv_strds,
-                    layer_data_size,
-                    frozenset(remain_lcnt.items()),
-                    frozenset(regf_unit_tensor.items()),
-                    frozenset(gbuf_unit_tensor.items()),
-                    tuple(bl_ords[BL.REGF]))
-            if froz_remain_lcnt is None:
-                continue
-
-            remain_lcnt = dict(froz_remain_lcnt)
-            regf_unit_tensor = dict(froz_regf_unit_tensor)
-            regf_tensor_repl_dict = dict(froz_regf_tensor_repl_dict)
-
             # Analyze regfile base stacks.
             _, regf_froz_init_data = shape_init_data_block(self.tdm, regf_unit_tensor)
             regf_base_stacks = tuple(regf_base_stacks)
@@ -291,8 +285,30 @@ class KaplaSolver():
             # Multiply the REGF level blocking factor.
             gbuf_unit_tensor = self.gbuf_tensor_mul(layer_type,
                                                     gbuf_unit_tensor,
-                                                    regf_tensor_repl_dict,
+                                                    None,
                                                     regf_stack_repl_dict)
+
+            # first fit as much as possible into regfile to reduce gbuf access.
+            froz_remain_lcnt, froz_regf_unit_tensor, froz_regf_tensor_repl_dict = \
+                self.fill_regf_tensor(layer_type,
+                    conv_strds,
+                    layer_data_size,
+                    frozenset(remain_lcnt.items()),
+                    frozenset(regf_unit_tensor.items()),
+                    frozenset(gbuf_unit_tensor.items()),
+                    tuple(bl_ords[BL.REGF]))
+            if froz_remain_lcnt is None:
+                continue
+
+            remain_lcnt = dict(froz_remain_lcnt)
+            regf_unit_tensor = dict(froz_regf_unit_tensor)
+            regf_tensor_repl_dict = dict(froz_regf_tensor_repl_dict)
+
+            # Multiply the REGF level blocking factor.
+            gbuf_unit_tensor = self.gbuf_tensor_mul(layer_type,
+                                                    gbuf_unit_tensor,
+                                                    regf_tensor_repl_dict,
+                                                    None)
 
             gbuf_repls = [resource.proc_region.dim.w, resource.proc_region.dim.h]
             # First if no buffer sharing, it's the same as regf level.
@@ -315,7 +331,8 @@ class KaplaSolver():
                     self.fill_stack(layer_type, layer_data_size, remain_lcnt, gbuf_unit_tensor,
                                     base_stack_fetch, gbuf_repls, bl_ords[BL.GBUF],
                                     multicast=self.options.hw_access_forwarding)
-                if util.prod(gbuf_repls) != 1:
+                if util.prod(gbuf_repls) != 1 and \
+                    ((min_cost < float('inf')) or (layer_type not in (lte.LOCAL, lte.LOCAL_BACK_H))):
                     print("Not enough data to be fully paralleled.")
                     continue
 
@@ -332,8 +349,9 @@ class KaplaSolver():
                 remain_lcnt, gbuf_stack_repl_dict, gbuf_repls = \
                     self.fill_stack(layer_type, layer_data_size, remain_lcnt, gbuf_unit_tensor,
                                     base_stack_fetch, gbuf_repls, bl_ords[BL.GBUF], multicast=True)
-                if util.prod(gbuf_repls) != 1:
-                    print("Not enough data to be fully paralleled: {}".format(gbuf_repls))
+                if util.prod(gbuf_repls) != 1 and \
+                    ((min_cost < float('inf')) or (layer_type not in (lte.LOCAL, lte.LOCAL_BACK_H))):
+                    print("Not enough data to be fully paralleled.")
                     continue
 
                 shr_node_num = [1, 1, 1]
@@ -435,55 +453,56 @@ class KaplaSolver():
             unit_nhops = partition.unit_nhops_to_proc_region(
                 layer, self.batch_size, resource.proc_region, part,
                 filter_nodes, ifmap_layout, ofmap_layout, self.options)
+            # unit_nhops = [0] * de.NUM
 
-            print("")
-            print("layer")
-            print(layer)
-            print("resource")
-            print(resource)
-            print("constraint")
-            print(cstr)
-            print("loopcnt")
-            print(loopcnt)
-            print("remain_lcnt")
-            print(remain_lcnt)
-            print("bl_ords")
-            print(bl_ords)
-            print("regf_workload")
-            print(regf_workload)
-            print("gbuf_workload")
-            print(gbuf_workload)
-            print("regf_tensor_repl_dict:")
-            print(regf_tensor_repl_dict)
-            print("regf_stack_repl_dict:")
-            print(regf_stack_repl_dict)
-            print("gbuf_tensor_repl_dict:")
-            print(gbuf_tensor_repl_dict)
-            print("gbuf_stack_repl_dict:")
-            print(gbuf_stack_repl_dict)
-            print("")
-            print("gbuf_unit_tensor")
-            print(gbuf_unit_tensor)
-            print("gbuf_stacks")
-            print(gbuf_stacks)
-            print("gbuf_updates")
-            print(gbuf_updates)
-            print("gbuf_stack_num")
-            print(gbuf_stack_num)
-            print("")
-            print("regf_unit_tensor")
-            print(regf_unit_tensor)
-            print("regf_stacks")
-            print(regf_stacks)
-            print("regf_updates")
-            print(regf_updates)
-            print("regf_stack_num")
-            print(regf_stack_num)
-            print("")
-            print("regf_ops_iter")
-            print(regf_ops_iter)
-            print("unit_ops")
-            print(unit_ops)
+            # print("")
+            # print("layer")
+            # print(layer)
+            # print("resource")
+            # print(resource)
+            # print("constraint")
+            # print(cstr)
+            # print("loopcnt")
+            # print(loopcnt)
+            # print("remain_lcnt")
+            # print(remain_lcnt)
+            # print("bl_ords")
+            # print(bl_ords)
+            # print("regf_workload")
+            # print(regf_workload)
+            # print("gbuf_workload")
+            # print(gbuf_workload)
+            # print("regf_tensor_repl_dict:")
+            # print(regf_tensor_repl_dict)
+            # print("regf_stack_repl_dict:")
+            # print(regf_stack_repl_dict)
+            # print("gbuf_tensor_repl_dict:")
+            # print(gbuf_tensor_repl_dict)
+            # print("gbuf_stack_repl_dict:")
+            # print(gbuf_stack_repl_dict)
+            # print("")
+            # print("gbuf_unit_tensor")
+            # print(gbuf_unit_tensor)
+            # print("gbuf_stacks")
+            # print(gbuf_stacks)
+            # print("gbuf_updates")
+            # print(gbuf_updates)
+            # print("gbuf_stack_num")
+            # print(gbuf_stack_num)
+            # print("")
+            # print("regf_unit_tensor")
+            # print(regf_unit_tensor)
+            # print("regf_stacks")
+            # print(regf_stacks)
+            # print("regf_updates")
+            # print(regf_updates)
+            # print("regf_stack_num")
+            # print(regf_stack_num)
+            # print("")
+            # print("regf_ops_iter")
+            # print(regf_ops_iter)
+            # print("unit_ops")
+            # print(unit_ops)
 
             # Get layer dataflow cost.
             accesses_result, noc_hops, cost_dict, total_cost, layer_time = \
@@ -587,42 +606,44 @@ class KaplaSolver():
 
     def gbuf_tensor_mul(self, layer_type, gbuf_unit_tensor, regf_tensor_repl_dict,
                         regf_stack_repl_dict):
-        for dim, r in regf_tensor_repl_dict.items():
-            if (layer_type == lte.LOCAL and dim == "K") or \
-               (layer_type == lte.LOCAL_BACK_H and dim == "C"):
-                gbuf_unit_tensor["C"] *= r
-                gbuf_unit_tensor["K"] *= r
-            elif self.array_mapping == ame.ROW_STATIONARY and \
-                 ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or \
-                 (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
-                gbuf_unit_tensor["Yo"] *= r
-                gbuf_unit_tensor["Yi"] *= r
-            elif self.array_mapping == ame.ROW_STATIONARY and \
-                 ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or \
-                 (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
-                gbuf_unit_tensor["Xo"] *= r
-                gbuf_unit_tensor["Xi"] *= r
-            else:
-                gbuf_unit_tensor[dim] *= r
-
-        for reg_stack_dict in regf_stack_repl_dict:
-            for dim, r in reg_stack_dict.items():
+        if regf_tensor_repl_dict:
+            for dim, r in regf_tensor_repl_dict.items():
                 if (layer_type == lte.LOCAL and dim == "K") or \
-                   (layer_type == lte.LOCAL_BACK_H and dim == "C"):
+                (layer_type == lte.LOCAL_BACK_H and dim == "C"):
                     gbuf_unit_tensor["C"] *= r
                     gbuf_unit_tensor["K"] *= r
                 elif self.array_mapping == ame.ROW_STATIONARY and \
-                     ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or \
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
+                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or \
+                    (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
                     gbuf_unit_tensor["Yo"] *= r
                     gbuf_unit_tensor["Yi"] *= r
                 elif self.array_mapping == ame.ROW_STATIONARY and \
-                     ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or \
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
+                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or \
+                    (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
                     gbuf_unit_tensor["Xo"] *= r
                     gbuf_unit_tensor["Xi"] *= r
                 else:
                     gbuf_unit_tensor[dim] *= r
+
+        if regf_stack_repl_dict:
+            for reg_stack_dict in regf_stack_repl_dict:
+                for dim, r in reg_stack_dict.items():
+                    if (layer_type == lte.LOCAL and dim == "K") or \
+                    (layer_type == lte.LOCAL_BACK_H and dim == "C"):
+                        gbuf_unit_tensor["C"] *= r
+                        gbuf_unit_tensor["K"] *= r
+                    elif self.array_mapping == ame.ROW_STATIONARY and \
+                        ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or \
+                        (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
+                        gbuf_unit_tensor["Yo"] *= r
+                        gbuf_unit_tensor["Yi"] *= r
+                    elif self.array_mapping == ame.ROW_STATIONARY and \
+                        ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or \
+                        (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
+                        gbuf_unit_tensor["Xo"] *= r
+                        gbuf_unit_tensor["Xi"] *= r
+                    else:
+                        gbuf_unit_tensor[dim] *= r
 
         return gbuf_unit_tensor
 
@@ -650,18 +671,18 @@ class KaplaSolver():
             if seg not in segments[seg[-1][-1]]:
                 segments[seg[-1][-1]].append(seg)
 
-        # priored_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
-        #                                    self.unit_cost, self.options)
+        priored_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
+                                           self.unit_cost, self.options)
         # return priored_segments
         return segments
 
     def solve_constraint(self, segment):
         for constraint, hints in segment.gen_constraint():
-            # if constraint[0][0].topbat != 0 \
-            #         and not segment_occp_is_valid(
-            #                 seg.seg, seg.network, seg.batch_size,
-            #                 constraint, seg.alloc):
-            #     continue
+            if constraint[0][0].topbat != 0 \
+                    and not segment_occp_is_valid(
+                            segment.seg, segment.network, segment.batch_size,
+                            constraint, segment.alloc):
+                continue
 
             yield constraint, hints
 
@@ -690,7 +711,7 @@ class KaplaSolver():
         unit_tensor = dict(froz_tensor)
         buf_size = self.resource.size_gbuf
         # print("")
-        # print("---begin to fill tensor")
+        # print("---begin to fill gbuf tensor")
         # print("remain_lcnt: {}".format(remain_lcnt))
         # print("unit_tensor: {}".format(unit_tensor))
         # print("buf_size: {}".format(buf_size))
@@ -799,7 +820,7 @@ class KaplaSolver():
         regf_buf = self.resource.size_regf
         gbuf_buf = self.resource.size_gbuf
         # print("")
-        # print("---begin to fill tensor")
+        # print("---begin to fill regf tensor")
         # print("remain_lcnt: {}".format(remain_lcnt))
         # print("regf_tensor: {}".format(regf_tensor))
         # print("gbuf_tensor: {}".format(gbuf_tensor))
@@ -808,7 +829,6 @@ class KaplaSolver():
         # print("shr_node_num: {}".format(shr_node_num))
         if not is_valid(self.tdm, layer_type, regf_tensor, regf_buf, shr_node_num) or \
            not is_valid(self.tdm, layer_type, gbuf_tensor, gbuf_buf, (1, 1, 1)):
-            print("Bad init unit tensor!")
             return None, None, None
 
         tensor_repl_dict = defaultdict(lambda: 1)
@@ -1308,8 +1328,8 @@ class KaplaSolver():
         if resource.no_time_mux:
             trivial_iter = True
             for dim in self.tdm.get_dtype_rlvt_dims(layer_type, de.FIL):
-                for upd_idx, dims in enumerate(g_upd_dims):
-                    if dim in dims and g_iter_times[upd_idx] != 1:
+                for upd_idx, dps in enumerate(g_upd_dims):
+                    if any(dim in dp for dp in dps) and (g_iter_times[upd_idx] != 1):
                         trivial_iter = False
 
             if layer_type == lte.CONV_BACK_W:
@@ -1353,42 +1373,42 @@ class KaplaSolver():
         mem_hops = [unh * f for unh, f in zip(unit_nhops, g_rd_iters)]
         noc_hops = [nnh + mnh for nnh, mnh in zip(node_hops, mem_hops)]
 
-        print("g_init_datas:")
-        print(g_init_datas)
-        print("g_upd_dims:")
-        print(g_upd_dims)
-        print("g_iter_times:")
-        print(g_iter_times)
-        print("g_logical_dim:")
-        print(g_logical_dim)
-        print("g_buf_sharings:")
-        print(g_buf_sharings)
-        print("gbuf_unit_accesses:")
-        print(gbuf_unit_accesses)
-        print("g_rd_iters:")
-        print(g_rd_iters)
-        print("")
-        print("r_init_datas:")
-        print(r_init_datas)
-        print("r_upd_dims:")
-        print(r_upd_dims)
-        print("r_iter_times:")
-        print(r_iter_times)
-        print("r_logical_dim:")
-        print(r_logical_dim)
-        print("r_remote_sharings:")
-        print(r_remote_sharings)
-        print("regf_unit_accesses:")
-        print(regf_unit_accesses)
-        print("regf_upper_iters:")
-        print(regf_upper_iters)
-        print("r_rd_iters:")
-        print(r_rd_iters)
+        # print("g_init_datas:")
+        # print(g_init_datas)
+        # print("g_upd_dims:")
+        # print(g_upd_dims)
+        # print("g_iter_times:")
+        # print(g_iter_times)
+        # print("g_logical_dim:")
+        # print(g_logical_dim)
+        # print("g_buf_sharings:")
+        # print(g_buf_sharings)
+        # print("gbuf_unit_accesses:")
+        # print(gbuf_unit_accesses)
+        # print("g_rd_iters:")
+        # print(g_rd_iters)
+        # print("")
+        # print("r_init_datas:")
+        # print(r_init_datas)
+        # print("r_upd_dims:")
+        # print(r_upd_dims)
+        # print("r_iter_times:")
+        # print(r_iter_times)
+        # print("r_logical_dim:")
+        # print(r_logical_dim)
+        # print("r_remote_sharings:")
+        # print(r_remote_sharings)
+        # print("regf_unit_accesses:")
+        # print(regf_unit_accesses)
+        # print("regf_upper_iters:")
+        # print(regf_upper_iters)
+        # print("r_rd_iters:")
+        # print(r_rd_iters)
 
-        print("bufshr_rdt_iters:")
-        print(bufshr_rdt_iters)
-        print("src_is_dram: {}".format(src_is_dram))
-        print("dst_is_dram: {}".format(dst_is_dram))
+        # print("bufshr_rdt_iters:")
+        # print(bufshr_rdt_iters)
+        # print("src_is_dram: {}".format(src_is_dram))
+        # print("dst_is_dram: {}".format(dst_is_dram))
 
         # calculate the cost
         cost_dict = dict()
@@ -1488,7 +1508,9 @@ class KaplaSolver():
                 porders[idx] = ord_counter
                 ord_counter += 1
 
-        porders = tuple(porders)
+        rv_porders = [porders.index(order) for order in range(nndf_pe.NUM)]
+
+        porders = tuple(rv_porders)
 
         pdims = [[1, 1] for _ in range(nndf_pe.NUM)]
         for drc, gbuf_repl in enumerate(gbuf_stack_repl_dict):
@@ -1654,7 +1676,8 @@ class KaplaSolver():
                 unit_access[me.ITCN][de.FIL] = 0
 
             unit_access[me.REGF] = [acclayer.total_ops() * util.prod(regf_stacks.values())] * de.NUM
-
+            if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+                unit_access[me.REGF][de.FIL] = 0
 
             sz_gbuf = self.tdm.get_tensor_size(layer_type, gbuf_unit_tensor)
             if layer_type in (lte.CONV, lte.LOCAL):
@@ -1722,28 +1745,32 @@ class KaplaSolver():
                 print("bufshr", tuple(bufshr.size(dce) for dce in range(de.NUM)))
 
         elif self.array_mapping == ame.SYSTOLIC:
-            part_layer, p_batch_size, p_occ = bufshr.part.part_layer(layer, self.batch_size)
+            # part_layer, p_batch_size, p_occ = bufshr.part.part_layer(layer, self.batch_size)
             fold_h, fold_w = mapping.fold.h, mapping.fold.w
-            fold_hofm = util.closest_factor(mapping.fold.h, factor=mapping.fold.h/2)[0]
-            fold_wofm = mapping.fold.h / fold_hofm
+            # fold_hofm = util.closest_factor(mapping.fold.h, factor=mapping.fold.h/2)[0]
+            # fold_wofm = mapping.fold.h / fold_hofm
+            full_xy = layer.hofm * layer.wofm
+            fold_xy = util.idivc(full_xy, mapping.fold.h)
+            fold_x = util.closest_factor(fold_xy, factor=math.sqrt(fold_xy))[0]
+            fold_y = fold_xy / fold_x
             if layer_type == lte.CONV:
                 acclayer = ConvLayer(
                     1, 1. * layer.nofm / fold_w,
-                    (1. * part_layer.hofm / fold_hofm, 1. * part_layer.wofm / fold_wofm),
-                    (part_layer.hfil, part_layer.wfil),
+                    (fold_x, fold_y),
+                    (layer.hfil, layer.wfil),
                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
-                    part_layer.hifm / part_layer.wifm
+                    layer.hifm / layer.wifm
                 dim_flpeset = PhyDim2(h=mapping.logic_region.h, w=mapping.logic_region.w)
                 unit_time = layer.wfil * layer.hfil
             elif layer_type == lte.LOCAL:
                 acclayer = LocalRegionLayer(
                     1. * layer.nofm / fold_w,
-                    (1. * part_layer.hofm / fold_hofm, 1. * part_layer.wofm / fold_wofm),
+                    (fold_x, fold_y),
                     layer.nreg, (layer.hreg, layer.wreg),
                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
-                    part_layer.hifm / part_layer.wifm
+                    layer.hifm / layer.wifm
                 dim_flpeset = PhyDim2(h=mapping.logic_region.h, w=mapping.logic_region.w)
                 unit_time = layer.nreg * layer.wreg * layer.hreg
 
@@ -1771,6 +1798,8 @@ class KaplaSolver():
                 unit_access[me.ITCN][de.FIL] = 0
 
             unit_access[me.REGF] = [acclayer.total_ops() * util.prod(regf_stacks.values())] * de.NUM
+            if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+                unit_access[me.REGF][de.FIL] = 0
 
             sz_gbuf = [0] * de.NUM
             sz_gbuf[de.IFM] = acclayer.total_ifmap_size() * util.prod(regf_stacks.values())
@@ -1814,6 +1843,12 @@ class KaplaSolver():
             lbs = LoopBlockingScheme(nld, bl_ts, bl_ords, real_resource, bufshr, self.options)
             if not lbs.is_valid():
                 print("LBS INVALID!")
+                print("acclayer.nofm", acclayer.nofm)
+                print('acclayer.hofm', acclayer.hofm)
+                print('acclayer.wofm', acclayer.wofm)
+                print('acclyaer.hfil', acclayer.hfil)
+                print('acclayer.wfil', acclayer.wfil)
+                print("mapping.fold", mapping.fold)
                 print("gbuf_stack_repl_dict", gbuf_stack_repl_dict)
                 print("part_workload", part_workload)
                 print("gbuf_unit_tensor", gbuf_unit_tensor)
@@ -2072,5 +2107,24 @@ def main():
         solve_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
 
 
+def test_function():
+    network = import_network("alex_net")
+    batch_size = 64
+    array_mapping = ame.ROW_STATIONARY
+    hw_fp = "nn_dataflow/hardwares/multi_node.json"
+    opt_fp = "nn_dataflow/options/option_inference.json"
+    solve_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
+
+
+def sensitivity_test():
+    network = import_network("resnet50")
+    batch_size = 8
+    hw_fp = "nn_dataflow/hardwares/multi_node_4x4.json"
+    opt_fp = "nn_dataflow/options/option_inference.json"
+    array_mapping = ame.ROW_STATIONARY
+    solve_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
+
+
 if __name__ == "__main__":
     sys.exit(main())
+    # sys.exit(sensitivity_test())

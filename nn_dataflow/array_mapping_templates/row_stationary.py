@@ -100,7 +100,7 @@ class RowStationary(object):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
                     self.repls["K"] = min(fact_repl_h[1] * fact_repl_w[1], self.workload["K"])
-                    self.repls["C"] = self.repls["K"]
+                    # self.repls["C"] = self.repls["K"]
 
                     lcnt = dict()
                     for dim in NN_DIM_LIST:
@@ -133,7 +133,7 @@ class RowStationary(object):
                     gbuf_unit_tensor["Xo"] = self.workload["Xo"]
                     gbuf_unit_tensor["Yo"] = self.workload["Yo"]
                     gbuf_unit_tensor["N"] = self.repls["N"]
-                    gbuf_unit_tensor["C"] = self.repls["C"] * self.conv_strds[2]
+                    gbuf_unit_tensor["C"] = self.repls["K"] * self.conv_strds[2]
                     gbuf_unit_tensor["K"] = self.repls["K"]
 
                     regf_unit_tensor = dict()
@@ -198,7 +198,7 @@ class RowStationary(object):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
                     self.repls["C"] = min(fact_repl_h[1] * fact_repl_w[1], self.workload["C"])
-                    self.repls["K"] = self.repls["C"]
+                    # self.repls["K"] = self.repls["C"]
 
                     lcnt = dict()
                     for dim in NN_DIM_LIST:
@@ -219,7 +219,7 @@ class RowStationary(object):
 
                     locc["N"] = 1. * self.workload["N"] / (self.repls["N"] * lcnt["N"])
                     locc["C"] = 1. * self.workload["C"] / (self.repls["C"] * lcnt["C"])
-                    locc["C"] = 1.
+                    locc["K"] = 1.
 
                     gbuf_unit_tensor = dict()
                     gbuf_unit_tensor["R"] = self.workload["R"]
@@ -230,7 +230,7 @@ class RowStationary(object):
                     gbuf_unit_tensor["Yo"] = self.workload["Yo"]
                     gbuf_unit_tensor["N"] = self.repls["N"]
                     gbuf_unit_tensor["C"] = self.repls["C"]
-                    gbuf_unit_tensor["K"] = self.repls["K"] * self.conv_strds[2]
+                    gbuf_unit_tensor["K"] = self.repls["C"] * self.conv_strds[2]
 
                     regf_unit_tensor = dict()
 
@@ -288,7 +288,10 @@ class RowStationary(object):
                 regf_stacks.append(("S", 1, "Yi", 1, self.logic_region.h))
                 for dim, repl in self.repls.items():
                     if repl > 1:
-                        regf_stacks.append((dim, repl))
+                        if dim == "K":
+                            regf_stacks.append(("C", repl * self.conv_strds[2], "K", repl))
+                        else:
+                            regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates
@@ -347,7 +350,10 @@ class RowStationary(object):
                 regf_stacks.append(("S", 1, "Yo", 1, self.logic_region.h))
                 for dim, repl in self.repls.items():
                     if repl > 1:
-                        regf_stacks.append((dim, repl))
+                        if dim == "C":
+                            regf_stacks.append(("C", repl, "K", repl * self.conv_strds[2]))
+                        else:
+                            regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates

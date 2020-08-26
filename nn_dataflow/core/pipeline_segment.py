@@ -29,6 +29,10 @@ from .network import Network
 from .resource import Resource
 from .scheduling_constraint import SchedulingConstraintLayerPipeline as Cstr
 
+# Scheduling index in the segment, as a tuple of spatial and temporal
+# scheduling indices.
+SchedIndex = namedtuple('SchedIndex', ['sp_idx', 'tm_idx'])
+
 class PipelineSegment():
     '''
     Inter-layer pipeline segment.
@@ -39,9 +43,6 @@ class PipelineSegment():
 
     # pylint: disable=too-many-instance-attributes
 
-    # Scheduling index in the segment, as a tuple of spatial and temporal
-    # scheduling indices.
-    SchedIndex = namedtuple('SchedIndex', ['sp_idx', 'tm_idx'])
 
     def __init__(self, seg, network, batch_size, resource, max_util_drop=0.05,
                  with_opt=True):
@@ -243,7 +244,7 @@ class PipelineSegment():
         self.ofm_fwd_dict = {}
 
         # Mapping from layer to spatial/temporal indices in the segment.
-        layer2idx = {l: PipelineSegment.SchedIndex(sp_idx, tm_idx)
+        layer2idx = {l: SchedIndex(sp_idx, tm_idx)
                      for sp_idx, ltpl in enumerate(self.seg)
                      for tm_idx, l in enumerate(ltpl)}
 
@@ -626,7 +627,7 @@ class PipelineSegment():
         sp_crit_path_cands.add((0,))  # init with the first spatial.
 
         # The last CONV layer index.
-        last_conv = PipelineSegment.SchedIndex(-1, 0)
+        last_conv = SchedIndex(-1, 0)
 
         # Whether the current group needs to fully buffer ofmap. Delayed apply
         # to the last layer in the group.
@@ -722,7 +723,7 @@ class PipelineSegment():
                         curr_sa['fbofm'] = fbofm_init
                         curr_fbofm = fbofm_init
 
-                    last_conv = PipelineSegment.SchedIndex(sp_idx, tm_idx)
+                    last_conv = SchedIndex(sp_idx, tm_idx)
 
                 else:
                     # Non-Conv layer.

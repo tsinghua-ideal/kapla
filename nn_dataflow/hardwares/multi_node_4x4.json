@@ -11,7 +11,7 @@
         "bus_width": 128
     },
     "GBUF": {
-        "size": 32768,
+        "size": 65536,
         "array": [4, 4],
         "access_cost": 2.8325450000000004e-12,
         "hop_cost": 9.76e-12,

@@ -94,3 +94,92 @@ def add_lstm_cell(network, name, size, xin, cin=None, hin=None):
 
     return cout_name, hout_name
 
+
+def add_back_lstm_cell(network, name, size, hout_name, cout_name=None, has_hin=False):
+    from nn_dataflow.core import Network
+    from nn_dataflow.core.layer import EltwiseLayer, FCBackActLayer, FCBackWeightLayer, EltwiseBackLayer
+    # hout.
+    hout_back_o_gate_name = '{}_hout_back_o_gate'.format(name)
+    hout_back_cout_name = '{}_hout_back_cout'.format(name)
+    prevs = (hout_name,)
+    network.add(hout_back_o_gate_name, EltwiseBackLayer(size, 1, 1), prevs=prevs)
+    network.add(hout_back_cout_name, EltwiseBackLayer(size, 1, 1), prevs=prevs)
+
+    # Cout.
+    cout_aggr_name = '{}_cout_aggr'.format(name)
+    cout_back_coutf_name = '{}_cout_back_coutf'.format(name)
+    cout_back_couti_name = '{}_cout_back_couti'.format(name)
+    prevs_hout = (hout_back_cout_name, cout_name) if cout_name else (hout_back_cout_name,)
+    cout_aggr_num = len(prevs_hout)
+    network.add(cout_aggr_name, EltwiseLayer(size, 1, cout_aggr_num), prevs=prevs_hout)
+    network.add(cout_back_coutf_name, EltwiseBackLayer(size, 1, 1), prevs=(cout_aggr_name,))
+    network.add(cout_back_couti_name, EltwiseBackLayer(size, 1, 1), prevs=(cout_aggr_name,))
+
+    # Coutf. No need to back-prop to cin.
+    coutf_back_f_gate_name = '{}_coutf_back_f_gate'.format(name)
+    prevs = (cout_back_coutf_name,)
+    network.add(coutf_back_f_gate_name, EltwiseBackLayer(size, 1, 1), prevs=prevs)
+
+    # Couti.
+    couti_back_i_gate_name = '{}_couti_back_i_gate'.format(name)
+    couti_back_cand_name = '{}_couti_back_cand'.format(name)
+    prevs = (cout_back_couti_name,)
+    network.add(couti_back_i_gate_name, EltwiseBackLayer(size, 1, 1), prevs=prevs)
+    network.add(couti_back_cand_name, EltwiseBackLayer(size, 1, 1), prevs=prevs)
+
+    weight_upd_size = 2 * size if has_hin else size
+
+    # Ogate.
+    ogate_back_xin_name = '{}_ogate_back_xin'.format(name)
+    ogate_back_hin_name = '{}_ogate_back_hin'.format(name)
+    ogate_back_w_upd_name = '{}_ogate_back_w_upd'.format(name)
+    prevs = (hout_back_o_gate_name,)
+    network.add(ogate_back_xin_name, FCBackActLayer(size, size), prevs=prevs)
+    if has_hin:
+        network.add(ogate_back_hin_name, FCBackActLayer(size, size), prevs=prevs)
+    network.add(ogate_back_w_upd_name, FCBackWeightLayer(size, weight_upd_size), prevs=prevs)
+
+    # Fgate.
+    fgate_back_xin_name = '{}_fgate_back_xin'.format(name)
+    fgate_back_hin_name = '{}_fgate_back_hin'.format(name)
+    fgate_back_w_upd_name = '{}_fgate_back_w_upd'.format(name)
+    prevs = (coutf_back_f_gate_name,)
+    network.add(fgate_back_xin_name, FCBackActLayer(size, size), prevs=prevs)
+    if has_hin:
+        network.add(fgate_back_hin_name, FCBackActLayer(size, size), prevs=prevs)
+    network.add(fgate_back_w_upd_name, FCBackWeightLayer(size, weight_upd_size), prevs=prevs)
+
+    # Igate.
+    igate_back_xin_name = '{}_igate_back_xin'.format(name)
+    igate_back_hin_name = '{}_igate_back_hin'.format(name)
+    igate_back_w_upd_name = '{}_igate_back_w_upd'.format(name)
+    prevs = (couti_back_i_gate_name,)
+    network.add(igate_back_xin_name, FCBackActLayer(size, size), prevs=prevs)
+    if has_hin:
+        network.add(igate_back_hin_name, FCBackActLayer(size, size), prevs=prevs)
+    network.add(igate_back_w_upd_name, FCBackWeightLayer(size, weight_upd_size), prevs=prevs)
+
+    # Cand.
+    cand_back_xin_name = '{}_cand_back_xin'.format(name)
+    cand_back_hin_name = '{}_cand_back_hin'.format(name)
+    cand_back_w_upd_name = '{}_cand_back_w_upd'.format(name)
+    prevs = (couti_back_cand_name,)
+    network.add(cand_back_xin_name, FCBackActLayer(size, size), prevs=prevs)
+    if has_hin:
+        network.add(cand_back_hin_name, FCBackActLayer(size, size), prevs=prevs)
+    network.add(cand_back_w_upd_name, FCBackWeightLayer(size, weight_upd_size), prevs=prevs)
+
+    # Xin aggr.
+    xin_aggr_name = '{}_xin_aggr'.format(name)
+    prevs = (ogate_back_xin_name, fgate_back_xin_name, igate_back_xin_name, cand_back_xin_name)
+    network.add(xin_aggr_name, EltwiseLayer(size, 1, 4), prevs=prevs)
+
+    # Hin aggr.
+    if has_hin:
+        hin_aggr_name = '{}_hin_aggr'.format(name)
+        prevs = (ogate_back_hin_name, fgate_back_hin_name, igate_back_hin_name, cand_back_hin_name)
+        network.add(hin_aggr_name, EltwiseLayer(size, 1, 4), prevs=prevs)
+    else:
+        hin_aggr_name = None
+
+    return xin_aggr_name, hin_aggr_name

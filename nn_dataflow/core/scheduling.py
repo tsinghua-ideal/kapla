@@ -340,6 +340,7 @@ class Scheduling():
         scheme['bus_time'] = lbs.bus_time
         scheme['dram_time'] = lbs.dram_time
         scheme['access'] = lbs.get_access()
+        scheme['unit_access'] = lbs.nld.unit_access
         scheme['remote_gbuf_access'] = lbs.remote_gbuf_access
         scheme['total_nhops'] = total_nhops
         scheme['fetch'] = lbs.fetch

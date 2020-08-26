@@ -19,8 +19,8 @@ from nn_dataflow.core import PhyDim2
 Fast explorer for a quick schedule on nn dataflow.
 '''
 
-def gen_segment_set(segments, ordered_layer_list, network, cost, options, explore_n_seg_sets=5,
-                    nprocesses=1):
+def gen_segment_set(segments, ordered_layer_list, network, cost, options, explore_n_seg_sets=4,
+                    nprocesses=8):
     '''
     Generate a set of best segments that are preferred to schedule.
     '''
@@ -106,7 +106,6 @@ def estimate_seg_cost(segment, network, options, cost):
     '''
     Estimate the cost of the segment.
     '''
-
     batch_size = segment.batch_size
 
     def _estimate_per_cstr_cost(constraint):

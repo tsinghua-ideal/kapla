@@ -177,9 +177,9 @@ def layer2workload(array_mapping, layer, batch_size):
         layer_tensor['K'] = layer.nofm
         layer_tensor['XY'] = layer.hofm * layer.wofm
         if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
-            layer_tensor['F'] = layer.wfil * layer.hfil
+            layer_tensor['F'] = max(layer.wtrd, layer.wfil) * max(layer.htrd, layer.hfil)
         elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
-            layer_tensor['F'] = layer.wreg * layer.wreg
+            layer_tensor['F'] = max(layer.wtrd, layer.wreg) * max(layer.htrd, layer.hreg)
 
     return layer_tensor
 
@@ -276,10 +276,10 @@ def part_workload(array_mapping, part, layer, batch_size):
             layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
             layer_tensor["XY"] = util.idivc(layer.wofm * layer.hofm, pdims[pe.OFMP].size())
             if isinstance(layer, ConvLayer):
-                layer_tensor["F"] = layer.hfil * layer.wfil
+                layer_tensor["F"] = max(layer.hfil, layer.htrd) * max(layer.wfil, layer.wtrd)
                 layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
             elif isinstance(layer, LocalRegionLayer):
-                layer_tensor["F"] = layer.hreg * layer.wreg
+                layer_tensor["F"] = max(layer.hreg, layer.htrd) * max(layer.wreg, layer.wtrd)
                 layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
         else:
             raise TypeError("Unsupported layer type: {}".format(type(layer)))

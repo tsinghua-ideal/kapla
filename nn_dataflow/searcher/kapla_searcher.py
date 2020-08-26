@@ -72,7 +72,7 @@ class KaplaSearcher():
         seg_no_counter = 0
         for layer_name in self.ordered_layer_list:
             print("{}: {}".format(layer_counter, layer_name))
-            # if layer_counter != 3:
+            # if layer_counter != 7:
             #     layer_counter += 1
             #     continue
             seg_counter = 0
@@ -601,6 +601,7 @@ class KaplaSearcher():
                     1,
                     (util.idivc(part_layer["Yo"], mapping_fold.w), part_layer["Xo"]),
                     conv_strds[2], (part_layer["S"], part_layer["R"]),
+                    ntrd=conv_strds[2],
                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yi"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
@@ -619,7 +620,9 @@ class KaplaSearcher():
                     1,
                     (util.idivc(part_layer["Yi"], mapping_fold.w), part_layer["Xi"]),
                     conv_strds[2], (part_layer["S"], part_layer["R"]),
-                    strd=(conv_strds[1], conv_strds[0]), rw_data=layer.rw_data)
+                    strd=(conv_strds[1], conv_strds[0]),
+                    ntrd=conv_strds[2],
+                    rw_data=layer.rw_data)
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yo"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
                                         w=util.idivc(part_layer["Yi"], mapping_fold.w))
@@ -661,6 +664,9 @@ class KaplaSearcher():
                 unit_access[me.ITCN][de.FIL] = 0
 
             unit_access[me.REGF] = [acclayer.total_ops() * util.prod(mapping_repls.values())] * de.NUM
+            if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+                unit_access[me.REGF][de.FIL] = 0
+
             sz_gbuf = self.tdm.get_tensor_size(layer_type, unit_size[BL.GBUF])
             sz_gbuf[de.IFM] /= mapping_fold.w
             sz_gbuf[de.OFM] /= mapping_fold.w
@@ -677,7 +683,7 @@ class KaplaSearcher():
                 sz_regf[de.OFM] = 1
             elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
                 sz_regf[de.FIL] = 0
-                sz_regf[de.IFM] = acclayer.wreg
+                sz_regf[de.IFM] = acclayer.wreg * acclayer.nreg
                 sz_regf[de.OFM] = 1
 
             ops_lpe = acclayer.total_ops() * util.prod(mapping_repls.values())
@@ -762,12 +768,16 @@ class KaplaSearcher():
         elif self.array_mapping == ame.SYSTOLIC:
             part_layer, p_batch_size, p_occ = bufshr.part.part_layer(layer, self.batch_size)
             fold_h, fold_w = mapping_fold.h, mapping_fold.w
-            fold_hofm = util.closest_factor(mapping_fold.h, factor=mapping_fold.h/2)[0]
-            fold_wofm = mapping_fold.h / fold_hofm
+            # fold_hofm = util.closest_factor(mapping_fold.h, factor=mapping_fold.h/2)[0]
+            # fold_wofm = mapping_fold.h / fold_hofm
+            full_xy = layer.hofm * layer.wofm
+            fold_xy = util.idivc(full_xy, mapping_fold.h)
+            fold_x = util.closest_factor(fold_xy, factor=math.sqrt(fold_xy))[0]
+            fold_y = fold_xy / fold_x
             if layer_type == lte.CONV:
                 acclayer = ConvLayer(
                     1, 1. * part_layer.nofm / fold_w,
-                    (1. * part_layer.hofm / fold_hofm, 1. * part_layer.wofm / fold_wofm),
+                    (fold_x, fold_y),
                     (part_layer.hfil, part_layer.wfil),
                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
@@ -777,7 +787,7 @@ class KaplaSearcher():
             elif layer_type == lte.LOCAL:
                 acclayer = LocalRegionLayer(
                     1. * layer.nofm / fold_w,
-                    (1. * part_layer.hofm / fold_hofm, 1. * part_layer.wofm / fold_wofm),
+                    (fold_x, fold_y),
                     layer.nreg, (layer.hreg, layer.wreg),
                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
@@ -845,7 +855,7 @@ class KaplaSearcher():
                         set_flags[lidx] = True
                         idx = knobs_tuple.index(dim)
                         for bl in range(BL.NUM+1):
-                            comp_bl_ts[bl][lidx] = bl_ts[bl][idx]
+                            comp_bl_ts[bl][lidx] *= bl_ts[bl][idx]
                         comp_bl_ords[BL.GBUF][lidx] = bl_ords[BL.GBUF][idx]
                         comp_bl_ords[BL.REGF][lidx] = bl_ords[BL.REGF][idx]
 
@@ -855,6 +865,10 @@ class KaplaSearcher():
                     for bl in range(BL.NUM):
                         comp_bl_ords[bl][lidx] = counter
                     counter += 1
+
+            for bl in range(BL.NUM):
+                for order, didx in enumerate(sorted(range(len(comp_bl_ords[bl])), key=lambda k: comp_bl_ords[bl][k])):
+                    comp_bl_ords[bl][didx] = order
 
             for i in range(BL.NUM):
                 comp_bl_ords[i] = tuple(comp_bl_ords[i])
@@ -884,6 +898,12 @@ class KaplaSearcher():
             lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr, self.options)
             if not lbs.is_valid():
                 print("LBS INVALID!")
+                print("acclayer.nofm", acclayer.nofm)
+                print('acclayer.hofm', acclayer.hofm)
+                print('acclayer.wofm', acclayer.wofm)
+                print('acclyaer.hfil', acclayer.hfil)
+                print('acclayer.wfil', acclayer.wfil)
+                print("mapping_fold", mapping_fold)
                 print("sz_gbuf", sz_gbuf)
                 print("sz_regf", sz_regf)
                 print("bl_ts", bl_ts)
@@ -946,6 +966,7 @@ class KaplaSearcher():
         scheme['bus_time'] = lbs.bus_time
         scheme['dram_time'] = lbs.dram_time
         scheme['access'] = lbs.get_access()
+        scheme['unit_access'] = lbs.nld.unit_access
         scheme['remote_gbuf_access'] = lbs.remote_gbuf_access
         scheme['total_nhops'] = total_nhops
         scheme['fetch'] = lbs.fetch
@@ -1131,8 +1152,8 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 if resource.no_time_mux:
                     trivial_iter = True
                     for dim in tdm.get_dtype_rlvt_dims(layer_type, de.FIL):
-                        for upd_idx, dims in enumerate(g_upd_dims):
-                            if dim in dims and g_iter_times[upd_idx] != 1:
+                        for upd_idx, dps in enumerate(g_upd_dims):
+                            if any(dim in dp for dp in dps) and (g_iter_times[upd_idx] != 1):
                                 trivial_iter = False
 
                     if layer_type == lte.CONV_BACK_W:
@@ -1219,7 +1240,10 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 # pp.pprint(bl_ts)
                 # pp.pprint(bl_ords)
                 # print("")
+                # pp.pprint(g_upd_dims)
+                # pp.pprint("fil rlvt dims: {}".format(tdm.get_dtype_rlvt_dims(layer_type, de.FIL)))
                 # pp.pprint(g_iter_times)
+                # pp.pprint(trivial_iter)
                 # pp.pprint(g_rd_iters)
                 # pp.pprint(gbuf_unit_accesses)
                 # pp.pprint(gbuf_tensor_dims)
@@ -1227,6 +1251,7 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 # pp.pprint(gbuf_updates)
                 # pp.pprint(g_buf_sharings)
                 # print("")
+                # pp.pprint(r_upd_dims)
                 # pp.pprint(r_iter_times)
                 # pp.pprint(r_rd_iters)
                 # pp.pprint(regf_unit_accesses)
@@ -1508,5 +1533,15 @@ def main():
         search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
 
 
+def sensitivity_test():
+    network = import_network("resnet50")
+    batch_size = 64
+    hw_fp = "nn_dataflow/hardwares/multi_node_4x4.json"
+    opt_fp = "nn_dataflow/options/option_inference.json"
+    array_mapping = ame.ROW_STATIONARY
+    search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
+
+
 if __name__ == "__main__":
     sys.exit(main())
+    # sys.exit(sensitivity_test())
