@@ -7,7 +7,6 @@ import math
 import time
 import argparse
 
-from multiprocessing import Pool
 from collections import defaultdict, OrderedDict
 
 from nn_dataflow import util
@@ -17,9 +16,8 @@ import nn_dataflow.core.mem_hier_enum as me
 import nn_dataflow.core.parallel_enum as nndf_pe
 from nn_dataflow.core import InterLayerPipeline, PhyDim2, PartitionScheme, FmapRange, \
     FmapPosition, DataLayout, partition, BufShrScheme, NestedLoopDesc, LoopBlockingScheme, \
-    SchedulingResult, NNDataflowScheme, Resource
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, \
-    LocalRegionBackLayer
+    SchedulingResult, NNDataflowScheme
+from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer
 from nn_dataflow.nns import import_network
 from nn_dataflow.core.node_region import NodeRegion
 
@@ -29,12 +27,11 @@ from nn_dataflow.array_mapping_templates.systolic import Systolic
 from nn_dataflow.array_mapping_templates.tensor_dim_map import RSTensorDimMap, ident_layer_type, \
     get_conv_strds, SystolicTensorDimMap
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
-from nn_dataflow.array_mapping_templates.tensor_dim_map import ParallelEnum as pe
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
 from nn_dataflow.parser.kapla_cost_model import KaplaCostModel
 from nn_dataflow.parser.kapla_parse_utils import parse_options, parse_hardware, parse_json, \
-    shape_init_data_block, SegDfCache, SimpleCstr, BL, nn_rearrange, layer2workload, is_valid, \
-    get_min_factor, part_workload
+    shape_init_data_block, SimpleCstr, BL, nn_rearrange, layer2workload, is_valid, \
+    get_min_factor
 
 
 class KaplaSolver:
