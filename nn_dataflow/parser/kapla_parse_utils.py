@@ -1,11 +1,9 @@
 import json
-import itertools
 from collections import namedtuple, OrderedDict
 
 from nn_dataflow.core import PhyDim2, NodeRegion, Resource, Option, Cost
 import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
-import nn_dataflow.core.loop_enum as le
 from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, \
     LocalRegionLayer, LocalRegionBackLayer
 from nn_dataflow import util
@@ -14,29 +12,32 @@ from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ParallelEnum as pe
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 
-class BL():
-    '''
+
+class BL:
+    """
     Blocking-level enum. Only used locally.
-    '''
+    """
     GBUF = 0
     REGF = 1
     NUM = 2
 
 
 CSTR_LIST = ['topbat', 'topifm', 'topofm']
+
+
 class SimpleCstr(namedtuple('SimpleCstr', CSTR_LIST)):
-    '''
+    """
     Simplified constraint specification.
-    '''
+    """
     def __new__(cls, *args, **kwargs):
         ntp = super(SimpleCstr, cls).__new__(cls, *args, **kwargs)
         return ntp
 
 
-class SegDfCache():
-    '''
+class SegDfCache:
+    """
     Cache segment dataflow and its cost.
-    '''
+    """
     def __init__(self, network):
         self.seg_df_cache = dict()
         self.network = network
@@ -205,16 +206,14 @@ def get_min_factor(number):
     return min_factor
 
 
-def nn_rearrange(seg_no, seg_df, prev_nndf):
-    nndf_result = None
+def nn_rearrange(seg_df, prev_nndf):
     cur_df, cur_cost, cur_seg_time, nndf, cur_total_cost = seg_df
     if prev_nndf is None:
         _df = OrderedDict()
         _df.update(cur_df)
-        total_cost = cur_total_cost
         total_time = max(cur_seg_time)
         cost_dict = dict(cur_cost)
-        return (_df, cost_dict, total_time, nndf, cur_total_cost)
+        return _df, cost_dict, total_time, nndf, cur_total_cost
     else:
         _df = OrderedDict()
         _cd = OrderedDict()
@@ -227,7 +226,7 @@ def nn_rearrange(seg_no, seg_df, prev_nndf):
         _df.update(prev_df)
         _df.update(cur_df)
 
-        return (_df, _cd, total_time, nndf, total_cost)
+        return _df, _cd, total_time, nndf, total_cost
 
 
 def part_workload(array_mapping, part, layer, batch_size):

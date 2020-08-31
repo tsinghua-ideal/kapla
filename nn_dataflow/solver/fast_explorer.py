@@ -15,15 +15,17 @@ from nn_dataflow.core.map_strategy import MapStrategyEyeriss
 from nn_dataflow.core import NodeRegion
 from nn_dataflow.core import PhyDim2
 
+
 '''
 Fast explorer for a quick schedule on nn dataflow.
 '''
 
+
 def gen_segment_set(segments, ordered_layer_list, network, cost, options, explore_n_seg_sets=4,
                     nprocesses=8):
-    '''
+    """
     Generate a set of best segments that are preferred to schedule.
-    '''
+    """
 
     # Put all segments in order.
     ordered_segments = list()
@@ -103,13 +105,13 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
 
 
 def estimate_seg_cost(segment, network, options, cost):
-    '''
+    """
     Estimate the cost of the segment.
-    '''
+    """
     batch_size = segment.batch_size
 
     def _estimate_per_cstr_cost(constraint):
-        ''' Estimate the cost of the segment under a given constraint. '''
+        """ Estimate the cost of the segment under a given constraint. """
         min_cost = 0
         for layer_name, rsrc, cstr in zip(
                 itertools.chain(*segment.seg),
@@ -135,8 +137,8 @@ def estimate_seg_cost(segment, network, options, cost):
     # advanced search methods cannot use.
     min_cost = float('inf')
     for cstr, _ in segment.gen_constraint():
-        if cstr[0][0].topbat != 0 \
-            and not segment_occp_is_valid(segment.seg, segment.network, segment.batch_size, cstr, segment.alloc):
+        if cstr[0][0].topbat != 0 and not segment_occp_is_valid(segment.seg, segment.network, segment.batch_size,
+                                                                cstr, segment.alloc):
             continue
         min_cost = _estimate_per_cstr_cost(cstr)
         if min_cost < float('inf'):
@@ -146,9 +148,9 @@ def estimate_seg_cost(segment, network, options, cost):
 
 
 def gen_partition_list(layer, batch_size, resource, constraint, cost, options, explore_n_parts=5):
-    '''
+    """
     Generate the best partition schemes that are preferred to schedule.
-    '''
+    """
     return SortedIterator(
         partition.gen_partition(layer, batch_size, resource.proc_region.dim,
                                 options, guaranteed=True),
@@ -159,10 +161,10 @@ def gen_partition_list(layer, batch_size, resource, constraint, cost, options, e
 
 def segment_occp_is_valid(seg_tuple, network, batch_size, constraint,
                           allocation):
-    '''
+    """
     Check if a segment is valid with the given scheduling constraint and
     resource allocation, in terms of the buffer occupation.
-    '''
+    """
 
     for lyr_tpl, cstr_tpl, alloc_tpl in zip(seg_tuple, constraint, allocation):
         for lyr, cstr, rsrc in zip(lyr_tpl, cstr_tpl, alloc_tpl):
@@ -177,11 +179,11 @@ def segment_occp_is_valid(seg_tuple, network, batch_size, constraint,
 
 
 def _estimate_buf_ifm_ofm_lb(layer, buf_batch, resource):
-    '''
+    """
     Estimate a lower bound of the product of the numbers of ifm-ofm pairs that
     can execute in parallel on the allocated resource, which is equal to the
     ratio of the total PE number over the number of ops per ifm-ofm pair.
-    '''
+    """
     total_pe = resource.proc_region.dim.size() * resource.dim_array.size()
     if isinstance(layer, (ConvLayer, LocalRegionLayer)):
         layer_ops = layer.filter_size() * layer.ofmap_size(buf_batch)
@@ -191,10 +193,10 @@ def _estimate_buf_ifm_ofm_lb(layer, buf_batch, resource):
 
 
 def _estimate_layer_occp(layer, batch_size, resource, constraint):
-    '''
+    """
     Estimate the buffer occupation for the layer executing on the given
     resource with the constraint.
-    '''
+    """
 
     buf_bat = batch_size // constraint.topbat if constraint.topbat else 1
 
@@ -256,10 +258,10 @@ def _estimate_layer_occp(layer, batch_size, resource, constraint):
 
 def partition_occp_is_valid(part, layer, batch_size, resource, constraint,
                             options, map_strategy="eyeriss"):
-    '''
+    """
     Check if a layer partition is valid with the given scheduling constraint
     and resource, in terms of the buffer occupation.
-    '''
+    """
     p_layer, p_batch, p_occ = part.part_layer(layer, batch_size)
 
     if options.hw_gbuf_sharing:
@@ -305,7 +307,7 @@ def partition_occp_is_valid(part, layer, batch_size, resource, constraint,
         else:
             buf_bl[le.BAT] = loop_cnt[le.BAT] // constraint.topbat
 
-        occp = [util.prod(nld.data_loops[dce].take(buf_bl)) * \
+        occp = [util.prod(nld.data_loops[dce].take(buf_bl)) *
                 nld.usize_gbuf_of(dce) // bufshr_size[dce]
                 for dce in range(de.NUM)]
         occp_list.append(sum(occp))
@@ -316,9 +318,9 @@ def partition_occp_is_valid(part, layer, batch_size, resource, constraint,
 @fastcache.clru_cache(maxsize=1024)
 def estimate_layer_cost(layer, batch_size, part, resource, constraint, cost,
                         options):
-    '''
+    """
     Estimate the cost of the layer under the given partition scheme.
-    '''
+    """
     if not partition_occp_is_valid(part, layer, batch_size, resource,
                                    constraint, options):
         return float('inf')
@@ -379,9 +381,6 @@ def _estimate_layer_accesses(layer, batch_size, part, resource, constraint,
 
 def _estimate_layer_mem_nhops(layer, batch_size, part, resource, constraint,
                               options):
-
-    layer_mh = [0] * de.NUM
-
     p_layer, p_batch, _ = part.part_layer(layer, batch_size)
 
     def _centralize_node(region):
@@ -459,11 +458,11 @@ def _filter_is_fully_buffered(p_layer, p_batch, constraint, bufshr_size,
 
 
 class SortedIterator(object):
-    '''
+    """
     An adaptive iterator that yields a given number of elements as sorted,
     according to the key of the element. The number of the yielded elements can
     be dynamically adjusted.
-    '''
+    """
     def __init__(self, iterator, counter=float('inf'), key=None):
         try:
             _ = iter(iterator)
@@ -484,7 +483,7 @@ class SortedIterator(object):
         return self
 
     def next(self):
-        ''' __next__. '''
+        """ __next__. """
         if self.counter == 0:
             raise StopIteration
         self.counter -= 1
@@ -494,5 +493,5 @@ class SortedIterator(object):
             raise StopIteration
 
     def increment_counter(self):
-        ''' Dynamically increment the number of yielded elements. '''
+        """ Dynamically increment the number of yielded elements. """
         self.counter += 1

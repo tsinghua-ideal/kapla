@@ -4,16 +4,14 @@ from collections import defaultdict
 from constraint import Problem
 
 from nn_dataflow import util
-import nn_dataflow.core.loop_enum as le
 import nn_dataflow.core.data_category_enum as de
-import nn_dataflow.core.mem_hier_enum as me
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, \
-    ConvBackWeightLayer, LocalRegionBackLayer
+from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 from nn_dataflow.array_mapping_templates.tensor_dim_map import SystolicTensorDimMap
 
-class KaplaCostModel():
+
+class KaplaCostModel:
     def __init__(self, tensor_dim_map):
         self.tdm = tensor_dim_map
 
@@ -62,7 +60,7 @@ class KaplaCostModel():
             upd_dims.append(tuple(dim_lists))
         return tuple(upd_dims), tuple(iter_times)
 
-    def analyze_relevant_accesses(self, init_datas, upd_dims, iter_times, options):
+    def analyze_relevant_accesses(self, init_datas, upd_dims, iter_times):
         unit_accesses = [() for _ in range(de.NUM)]
         for dce in range(de.NUM):
             if self.layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and dce == de.FIL:
@@ -71,7 +69,6 @@ class KaplaCostModel():
             init_db = init_datas[dce]
             db_dims_dict = defaultdict(lambda: dict())
 
-            irrlvt_iter = 1
             for upd_dim, iter_time in zip(upd_dims, iter_times):
                 for dim, dim_size in upd_dim:
                     if dim not in rlvt_dims:
@@ -81,7 +78,8 @@ class KaplaCostModel():
                             for sz in db_dims_dict[dim].keys():
                                 db_dims_dict[dim][sz] *= iter_time
                         else:
-                            raise ValueError("Invalid update step {} for dim {}, tensor db size: {}".format(dim_size, dim, db_dims_dict[dim].keys()))
+                            raise ValueError("Invalid update step {} for dim {}, tensor db size: {}".format(
+                                dim_size, dim, db_dims_dict[dim].keys()))
                     else:
                         if init_db[dim] != dim_size:
                             db_dims_dict[dim][init_db[dim]] = 1
@@ -89,7 +87,7 @@ class KaplaCostModel():
                         else:
                             db_dims_dict[dim][dim_size] = iter_time
 
-            db_evo_list = [(1, 1),]
+            db_evo_list = [(1, 1)]
 
             for dim in rlvt_dims:
                 new_evo_list = []
@@ -162,7 +160,8 @@ class KaplaCostModel():
         return upper_fetches
 
     @functools.lru_cache(maxsize=1024)
-    def bufshr_redundant_iter(self, gbuf_upd_dims, gbuf_iter_times, regf_upd_dims, regf_iter_times, regf_bl_ord, g_redundant_iters, opt_out_bufshr):
+    def bufshr_redundant_iter(self, gbuf_upd_dims, gbuf_iter_times, regf_upd_dims, regf_iter_times, regf_bl_ord,
+                              g_redundant_iters, opt_out_bufshr):
         bufshr_rdt_iters = [1 for _ in range(de.NUM)]
 
         for g_upd_dims, iter_time in zip(gbuf_upd_dims, gbuf_iter_times):
@@ -184,7 +183,7 @@ class KaplaCostModel():
             for dim, _ in regf_upd_dims[index]:
                 for dce in range(de.NUM):
                     # if (dim in DATA_LIST[dce]) and (regf_iter_times[index] > 1):
-                        # outter_encounted_flag[dce] = True
+                    # outter_encounted_flag[dce] = True
                     if dim in self.tdm.data_list[dce]:
                         outter_encounted_flag[dce] = True
             for dce in range(de.NUM):
@@ -205,14 +204,14 @@ class KaplaCostModel():
                         is_trivial[dce] = False
         for dce in range(de.NUM):
             if (bufshr_rdt_iters[dce] == ((g_redundant_iters[dce] + 1) // 2 if dce == self.rw_data
-                                        else g_redundant_iters[dce])) or \
-                opt_out_bufshr or \
-                is_trivial[dce]:
+                    else g_redundant_iters[dce])) or \
+                    opt_out_bufshr or \
+                    is_trivial[dce]:
                 bufshr_rdt_iters[dce] = 0
         return tuple(bufshr_rdt_iters)
 
     def analyze_gbuf_level_access(self, unit_accesses, redundant_iters, logical_dim, buf_sharings,
-                                bufshr_rdt_iters, options):
+                                  bufshr_rdt_iters, options):
         dram_accesses = [0 for _ in range(de.NUM)]
         fwd_hops = [0 for _ in range(de.NUM)]
         buf_shr_hops = [0 for _ in range(de.NUM)]
@@ -236,16 +235,18 @@ class KaplaCostModel():
                 _, shr_node_num, avg_fwd_dist, avg_rot_dist = bufshr
                 dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num / shr_node_num
                 if options.hw_access_forwarding:
-                    fwd_hops[dce] = sum(unit_accesses[dce]) * rdt_iter * avg_fwd_dist * (shr_node_num - 1) * logical_node_num / \
-                            shr_node_num
+                    fwd_hops[dce] = sum(unit_accesses[dce]) * rdt_iter * avg_fwd_dist * (
+                                shr_node_num - 1) * logical_node_num / \
+                                    shr_node_num
                 if options.hw_gbuf_sharing:
-                    buf_shr_hops[dce] = sum(unit_accesses[dce]) * bufshr_rdt_iters[dce] * avg_rot_dist / shr_node_num * (shr_node_num - 1) * \
-                                logical_node_num / shr_node_num
+                    buf_shr_hops[dce] = sum(unit_accesses[dce]) * bufshr_rdt_iters[
+                        dce] * avg_rot_dist / shr_node_num * (shr_node_num - 1) * \
+                                        logical_node_num / shr_node_num
 
         return dram_accesses, fwd_hops, buf_shr_hops
 
     def analyze_regf_level_access(self, unit_accesses, redundant_iters, logical_dim, remote_sharings,
-                                temporal_sharings, upper_iter_num, upper_repl_num):
+                                  temporal_sharings, upper_iter_num, upper_repl_num):
         logical_node_num = logical_dim[0] * logical_dim[1]
         fetches = [0 for _ in range(de.NUM)]
         gbuf_accesses = [0 for _ in range(de.NUM)]
@@ -286,9 +287,9 @@ class KaplaCostModel():
         init_datas = []
         for init_data_tp in init_data_tuple:
             init_datas.append(dict(init_data_tp))
-        local_sharings = [] #(data type, node_nums, avg_hop_dist)
-        remote_sharings = [] #(data_type, node_nums, avg_hop_dist)
-        temporal_sharings = [] #(data_update_size, node_nums, avg_hops_dist)
+        local_sharings = []  # (data type, node_nums, avg_hop_dist)
+        remote_sharings = []  # (data_type, node_nums, avg_hop_dist)
+        temporal_sharings = []  # (data_update_size, node_nums, avg_hops_dist)
 
         stack_dir = []
         if phy_dims.w > phy_dims.h:
@@ -381,7 +382,7 @@ class KaplaCostModel():
                         vidxs = []
                         for idx_tuple in dim_stack_map[s_dim]:
                             stack_idx_set.add(idx_tuple[0])
-                            coefs.append(stacks[idx_tuple[0]][idx_tuple[1]+1])
+                            coefs.append(stacks[idx_tuple[0]][idx_tuple[1] + 1])
                             vidxs.append(idx_tuple[0])
                         if len(coefs) != 0:
                             equations.append(coefs)
@@ -407,11 +408,11 @@ class KaplaCostModel():
                         for s_idx, s_dim in enumerate(equation_dim_list):
                             for dim_idx in range(0, len(upd) - 1, 2):
                                 upd_dim = upd[dim_idx]
-                                upd_step = upd[dim_idx+1]
+                                upd_step = upd[dim_idx + 1]
                                 if s_dim == upd_dim:
                                     diffs[s_idx] = upd_step
                         tmp_shr_nodes = self.solve_same_pairs(equations, variable_idxs,
-                            stacks_repls, diffs)
+                                                              stacks_repls, diffs)
                         tmp_shr_list.append(tmp_shr_nodes)
                     temporal_sharings.append(tmp_shr_list)
         else:
@@ -425,7 +426,7 @@ class KaplaCostModel():
         if diffs is None:
             diffs = [0 for _ in equations]
         stack_num = len(stacks_repls)
-        variable_list = [("s"+str(i), "t"+str(i)) for i in range(stack_num)]
+        variable_list = [("s" + str(i), "t" + str(i)) for i in range(stack_num)]
         s_variables = [var_tp[0] for var_tp in variable_list]
         t_variables = [var_tp[1] for var_tp in variable_list]
         problem = Problem()
@@ -435,20 +436,22 @@ class KaplaCostModel():
         def _node_retrieve(node_pair):
             s = tuple(map(node_pair.get, s_variables))
             t = tuple(map(node_pair.get, t_variables))
-            vs = tuple(sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
-            vt = tuple(sum(c * t[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
+            vs = tuple(
+                sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
+            vt = tuple(
+                sum(c * t[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
             if vs < vt:
-                return [s,], vs
+                return [s, ], vs
             elif vs > vt:
-                return [t,], vt
+                return [t, ], vt
             else:
                 return [s, t], vs
 
         def _create_eq_func(cfs, diff):
-            return lambda *vars: sum(cfs[i] * (vars[2*i] - vars[2*i+1]) for i in range(len(vars) // 2)) == diff
+            return lambda *vars: sum(cfs[i] * (vars[2 * i] - vars[2 * i + 1]) for i in range(len(vars) // 2)) == diff
 
         _exclude_self_func = \
-                lambda *vars: any(vars[i] != vars[i+1] for i in range(0, len(vars), 2))
+            lambda *vars: any(vars[i] != vars[i + 1] for i in range(0, len(vars), 2))
         for coefs, v_idxs, diff in zip(equations, variable_idxs, diffs):
             vs = [variable_list[v_idx] for v_idx in v_idxs]
             problem.addConstraint(_create_eq_func(coefs, diff), tuple(itertools.chain(*vs)))
@@ -470,10 +473,8 @@ class KaplaCostModel():
 
         return node_shr_dict
 
-
     def get_avg_dist_in_region(self, region):
         return (region[0] // 2 + region[1] // 2) / 2
-
 
     def prod_data_iter(self, start_idx, data_type, flat_iter_times, flat_upd_sizes):
         up_iters = 1
@@ -482,7 +483,6 @@ class KaplaCostModel():
                 up_iters *= flat_iter_times[up_idx]
 
         return up_iters
-
 
     def approx_inter_layer_dist(self, resource):
         inter_layer_dist = [0] * de.NUM
@@ -508,11 +508,8 @@ class KaplaCostModel():
 
     def seg_time_estimation(self, network, segment, seg_times, real_cstr_dict):
         bat_ngrp = 0
-        ifm_ngrp = 0
-        ofm_ngrp = 0
 
         dram_time = 0
-        node_time = 0
         seg_layer_idx = dict()
         seg_timing = list()
         for sp_idx, (ltpl, ltimes) in enumerate(zip(segment, seg_times)):
@@ -523,7 +520,7 @@ class KaplaCostModel():
                 layer_t = max(proc_t, dram_t, bus_t)
                 dram_time += dram_t
                 is_conv = isinstance(network[layer_name],
-                    (ConvLayer, ConvBackActLayer, ConvBackWeightLayer))
+                                     (ConvLayer, ConvBackActLayer, ConvBackWeightLayer))
                 real_cstr = real_cstr_dict[layer_name]
                 if not bat_ngrp:
                     bat_ngrp = real_cstr.topbat
@@ -574,4 +571,4 @@ class KaplaCostModel():
 
         total_time = max(node_time, dram_time)
 
-        return (node_time, dram_time)
+        return node_time, dram_time
