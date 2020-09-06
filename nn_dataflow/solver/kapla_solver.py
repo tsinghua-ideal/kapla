@@ -53,7 +53,7 @@ class KaplaSolver:
         elif array_mapping == ame.SYSTOLIC:
             self.tdm = SystolicTensorDimMap()
         else:
-            raise ValueError("No corresponding dim map: {}".format(array_mapping))
+            raise ValueError("No corresponding array mapping: {}".format(array_mapping))
 
         self.cost_model = KaplaCostModel(self.tdm)
 
@@ -195,13 +195,14 @@ class KaplaSolver:
                 print("cost: {}".format(sum(cost_dict.values())))
                 print("time: {}".format(layer_time))
                 print("---")
+
                 sched_result = self.derive_sched_result(seg_idx, sp_idx, tm_idx,
                                                         resource, ifmap_layout, sched_vars)
                 print("sched_result", sched_result)
                 cur_nndf[layer_name] = sched_result
 
                 seg_df[layer_name]["dataflow"] = df
-                seg_df[layer_name]["sched_seq"] = [0, sp_idx, tm_idx]
+                seg_df[layer_name]["sched_seq"] = [seg_idx, sp_idx, tm_idx]
                 for key, value in cost_dict.items():
                     seg_costs[key] = seg_costs.setdefault(key, 0) + value
                 cstr_collections[layer_name] = real_cstr
@@ -431,20 +432,21 @@ class KaplaSolver:
             # Filter nodes. All memory nodes can store filters. Deduplicate.
             filter_nodes = frozenset(resource.dram_region.iter_node())
             # Ofmap layout.
-            ofmap_range = FmapRange(
-                FmapPosition(b=0, n=0, h=0, w=0),
-                FmapPosition(b=self.batch_size, n=layer.nofm,
-                             h=layer.hofm, w=layer.wofm))
-            ofmap_data_region = resource.dst_data_region
-            ofmap_layout = DataLayout(
-                frngs=(ofmap_range,),
-                regions=(ofmap_data_region,),
-                parts=(part.projection(ofmap_data_region, appl2frng=True),))
+            # ofmap_range = FmapRange(
+            #     FmapPosition(b=0, n=0, h=0, w=0),
+            #     FmapPosition(b=self.batch_size, n=layer.nofm,
+            #                  h=layer.hofm, w=layer.wofm))
+            # ofmap_data_region = resource.dst_data_region
+            # ofmap_layout = DataLayout(
+            #     frngs=(ofmap_range,),
+            #     regions=(ofmap_data_region,),
+            #     parts=(part.projection(ofmap_data_region, appl2frng=True),))
             # Partition NoC hop cost.
-            unit_nhops = partition.unit_nhops_to_proc_region(
-                layer, self.batch_size, resource.proc_region, part,
-                filter_nodes, ifmap_layout, ofmap_layout, self.options)
+            # unit_nhops = partition.unit_nhops_to_proc_region(
+            #     layer, self.batch_size, resource.proc_region, part,
+            #     filter_nodes, ifmap_layout, ofmap_layout, self.options)
             # unit_nhops = [0] * de.NUM
+            unit_nhops = self._estimate_layer_mem_nhops(layer, part, resource)
 
             # print("")
             # print("layer")
@@ -1986,6 +1988,53 @@ class KaplaSolver:
                     for ext_frng in ext_frngs])) if ext_layers else None
 
             yield input_layout, ext_layout_dict
+
+    def _estimate_layer_mem_nhops(self, layer, part, resource):
+        p_layer, p_batch, _ = part.part_layer(layer, self.batch_size)
+
+        def _centralize_node(region):
+            central_origin = region.rel2abs(PhyDim2(region.dim.h/2, region.dim.w/2))
+            return central_origin
+
+        def _find_nearest_node(nodes, target_node):
+            return min(nodes, key=lambda node: node.hop_dist(target_node))
+
+        # To simplify unit nhops computation, we use the central node to represent
+        # each layout and the process region.
+        src_central_node = _centralize_node(resource.src_data_region)
+        dst_central_node = _centralize_node(resource.dst_data_region)
+        proc_central_node = _centralize_node(resource.proc_region)
+
+        # Filter nodes. All memory nodes can store filters.
+        filter_nodes = frozenset(resource.dram_region.iter_node())
+        nearest_filter_node = _find_nearest_node(filter_nodes, proc_central_node)
+
+        # Use the central region of the `proc_region`.
+        dists = [None] * de.NUM
+        dists[de.IFM] = proc_central_node.hop_dist(src_central_node)
+        dists[de.OFM] = proc_central_node.hop_dist(dst_central_node)
+        dists[de.FIL] = proc_central_node.hop_dist(nearest_filter_node)
+
+        # Data sizes considered duplication.
+        data_sizes = [0] * de.NUM
+        data_sizes[de.IFM] = p_layer.total_ifmap_size(p_batch) * part.size()
+        data_sizes[de.OFM] = p_layer.total_ofmap_size(p_batch) * part.size()
+        try:
+            data_sizes[de.FIL] = p_layer.total_filter_size() * part.size()
+        except AttributeError:
+            pass
+
+        if self.options.hw_access_forwarding or self.options.hw_gbuf_sharing:
+            bufshr = BufShrScheme(resource.proc_region, part, layer.data_loops())
+            bufshr_size = tuple(bufshr.size(dce) for dce in range(de.NUM))
+
+            # Use bufshr_size to estimate data-forwarding hops within
+            # the proc region.
+            dists = [d + bss for d, bss in zip(dists, bufshr_size)]
+            # Divide bufshr_size to eliminate the duplicate.
+            data_sizes = [s / bss for s, bss in zip(data_sizes, bufshr_size)]
+
+        return tuple(s * d for s, d in zip(data_sizes, dists))
 
 
 def solve_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, back_prop=False):
