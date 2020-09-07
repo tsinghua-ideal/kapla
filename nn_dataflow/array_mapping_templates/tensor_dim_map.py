@@ -38,30 +38,6 @@ class ParallelEnum():
 
 pe = ParallelEnum()
 
-def ident_layer_type(layer):
-    layer_type = 0
-    if isinstance(layer, ConvLayer):
-        layer_type = lte.CONV
-    elif isinstance(layer, LocalRegionLayer):
-        layer_type = lte.LOCAL
-    elif isinstance(layer, ConvBackActLayer):
-        layer_type = lte.CONV_BACK_H
-    elif isinstance(layer, ConvBackWeightLayer):
-        layer_type = lte.CONV_BACK_W
-    elif isinstance(layer, LocalRegionBackLayer):
-        layer_type = lte.LOCAL_BACK_H
-    else:
-        raise TypeError("Unsupport layer type: {}".format(type(layer)))
-    return layer_type
-
-
-def get_conv_strds(layer_type, layer):
-    if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
-        conv_strds = (layer.wtrd, layer.htrd, 1)
-    elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
-        conv_strds = (layer.wtrd, layer.htrd, layer.ntrd)
-    return conv_strds
-
 
 class RSTensorDimMap(object):
     '''

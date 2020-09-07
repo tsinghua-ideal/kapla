@@ -29,6 +29,7 @@ class SimpleCstr(namedtuple('SimpleCstr', CSTR_LIST)):
     """
     Simplified constraint specification.
     """
+
     def __new__(cls, *args, **kwargs):
         ntp = super(SimpleCstr, cls).__new__(cls, *args, **kwargs)
         return ntp
@@ -38,6 +39,7 @@ class SegDfCache:
     """
     Cache segment dataflow and its cost.
     """
+
     def __init__(self, network):
         self.seg_df_cache = dict()
         self.network = network
@@ -302,7 +304,8 @@ def construct_stack(array_mapping, layer_type, part, workload):
                     if pdim.w != 1:
                         stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
                     if pdim.h != 1:
-                        stacks.append(("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
+                        stacks.append(
+                            ("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
             elif pae == pe.INPP:
                 if pdim.w != 1:
                     stacks.append(("C", workload["C"], pdim.w))
@@ -344,7 +347,8 @@ def construct_stack(array_mapping, layer_type, part, workload):
                     if pdim.w != 1:
                         stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
                     if pdim.h != 1:
-                        stacks.append(("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
+                        stacks.append(
+                            ("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
             elif pae == pe.BATP:
                 if pdim.w != 1:
                     stacks.append(("N", workload["N"], pdim.w))
@@ -385,3 +389,29 @@ def layer_rearrange(tdm, layer_type, gbuf_tensor_dims, gbuf_stack, gbuf_update, 
     layer_df['REGF'] = regf_df
 
     return layer_df
+
+
+def ident_layer_type(layer):
+    if isinstance(layer, ConvLayer):
+        layer_type = lte.CONV
+    elif isinstance(layer, LocalRegionLayer):
+        layer_type = lte.LOCAL
+    elif isinstance(layer, ConvBackActLayer):
+        layer_type = lte.CONV_BACK_H
+    elif isinstance(layer, ConvBackWeightLayer):
+        layer_type = lte.CONV_BACK_W
+    elif isinstance(layer, LocalRegionBackLayer):
+        layer_type = lte.LOCAL_BACK_H
+    else:
+        raise TypeError("Unsupport layer type: {}".format(type(layer)))
+    return layer_type
+
+
+def get_conv_strds(layer_type, layer):
+    if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+        conv_strds = (layer.wtrd, layer.htrd, 1)
+    elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+        conv_strds = (layer.wtrd, layer.htrd, layer.ntrd)
+    else:
+        raise TypeError("get_conv_strds: Invalid layer type {}".format(layer_type))
+    return conv_strds
