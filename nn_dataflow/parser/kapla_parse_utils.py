@@ -254,17 +254,19 @@ def part_workload(array_mapping, part, layer, batch_size):
                 layer_tensor["Yi"] = (layer_tensor["Yo"] - 1) * layer.htrd + layer.hreg
         elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
             layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
-            layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
             layer_tensor["Xi"] = util.idivc(layer.wifm, pdims[pe.OFMP].w)
             layer_tensor["Yi"] = util.idivc(layer.hifm, pdims[pe.OFMP].h)
             if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
                 layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
                 layer_tensor["R"] = layer.wfil
                 layer_tensor["S"] = layer.hfil
                 layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wfil
                 layer_tensor["Yo"] = (layer_tensor["Yi"] - 1) * layer.htrd + layer.hfil
             elif isinstance(layer, LocalRegionBackLayer):
-                layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.INPP].size())
+                # layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.INPP].size())
+                layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
                 layer_tensor["R"] = layer.wreg
                 layer_tensor["S"] = layer.hreg
                 layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wreg
@@ -290,7 +292,6 @@ def part_workload(array_mapping, part, layer, batch_size):
 
 def construct_stack(array_mapping, layer_type, part, workload):
     stacks = []
-
     if layer_type in (lte.CONV, lte.LOCAL):
         for pae in reversed(part.order):
             pdim = part.pdims[pae]
@@ -333,10 +334,17 @@ def construct_stack(array_mapping, layer_type, part, workload):
         for pae in reversed(part.order):
             pdim = part.pdims[pae]
             if pae == pe.OUTP:
-                if pdim.w != 1:
-                    stacks.append(("K", workload["K"], pdim.w))
-                if pdim.h != 1:
-                    stacks.append(("K", pdim.w * workload["K"], pdim.h))
+                if layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
+                    if pdim.w != 1:
+                        stacks.append(("K", workload["K"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(("K", pdim.w * workload["K"], pdim.h))
+                elif layer_type == lte.LOCAL_BACK_H:
+                    if pdim.w != 1:
+                        stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
+                    if pdim.h != 1:
+                        stacks.append(
+                            ("C", pdim.w * workload["C"], "K", pdim.w * workload["K"], pdim.h))
             elif pae == pe.INPP:
                 if layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
                     if pdim.w != 1:
@@ -354,7 +362,7 @@ def construct_stack(array_mapping, layer_type, part, workload):
                     stacks.append(("N", workload["N"], pdim.w))
                 if pdim.h != 1:
                     stacks.append(("N", pdim.w * workload["N"], pdim.h))
-            elif pae == pe.IFMP:
+            elif pae == pe.OFMP: # pe.IFMP
                 if pdim.w != 1:
                     stacks.append(("Xo", workload["Xo"], "Xi", workload["Xi"], pdim.w))
                 if pdim.h != 1:
@@ -364,7 +372,7 @@ def construct_stack(array_mapping, layer_type, part, workload):
     return stacks
 
 
-def layer_rearrange(tdm, layer_type, gbuf_tensor_dims, gbuf_stack, gbuf_update, regf_tensor_dims,
+def layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack, gbuf_update, regf_tensor_dims,
                     regf_stack, regf_update, buf_sharing):
     layer_df = dict()
     gbuf_df = dict()

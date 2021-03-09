@@ -150,7 +150,7 @@ class LoopBlockingScheme():
 
         if self.nld.rw_data == de.FIL:
             assert self.dst_is_dram, 'LoopBlockingScheme: ConvBackWeightLayer' \
-                   'shoud be written to dram!'
+                   'should be written to dram!'
 
         # If data regions are not DRAM, can only access once, no spilling.
         if not self.src_is_dram:

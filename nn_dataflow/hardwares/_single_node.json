@@ -7,8 +7,8 @@
     "DRAM": {
         "size": null,
         "access_cost": 4.0189027539954336e-10,
-        "bandwidth": 12.8,
-        "bus_width": 256
+        "bandwidth": 51.2,
+        "bus_width": 128
     },
     "GBUF": {
         "size": 262144,

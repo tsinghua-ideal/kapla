@@ -9,7 +9,7 @@ LSTM from GNMT in back-prop.
 Sutskever, Vinyals, Le, Google, NIPS 2014
 '''
 
-NN = Network('GNMT')
+NN = Network('GNMTBP')
 
 NN.set_input_layer(InputLayer(1000, 1))
 

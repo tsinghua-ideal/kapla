@@ -265,6 +265,7 @@ class Scheduling():
         # Partitioned layer.
         p_layer, p_batch_size, p_occ = part.part_layer(self.layer,
                                                        self.batch_size)
+        print('part: {}, layer: {}, p_layer: {}, p_batch_size: {}'.format(part, self.layer, p_layer, p_batch_size))
         # Mapping strategy.
         reverse_mapping = False
         if isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
@@ -272,6 +273,7 @@ class Scheduling():
         map_strategy = self.map_strategy_class(p_layer, p_batch_size, p_occ,
                                                resource.dim_array,
                                                reverse_mapping=reverse_mapping)
+        print('repl: {}, layer.nofm: {}'.format(map_strategy.repl, map_strategy.layer.nofm), flush=True)
 
         # Explore PE array mapping schemes for partitioned layer.
         for nested_loop_desc in map_strategy.gen_nested_loop_desc():

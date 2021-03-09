@@ -54,7 +54,8 @@ class KaplaCostModel:
                 if workload[dim] < tensor_dims[dim]:
                     iter_time = 1
                 else:
-                    iter_time = min(1 + util.idivc((workload[dim] - max(tensor_dims[dim], strd)), strd), iter_time)
+                    iter_time = min(1 + util.idivc((workload[dim] - max(tensor_dims[dim], strd)),
+                                                   strd), iter_time)
                 dim_lists.append((dim, min(strd, tensor_dims[dim])))
             iter_times.append(iter_time)
             upd_dims.append(tuple(dim_lists))
@@ -78,8 +79,9 @@ class KaplaCostModel:
                             for sz in db_dims_dict[dim].keys():
                                 db_dims_dict[dim][sz] *= iter_time
                         else:
-                            raise ValueError("Invalid update step {} for dim {}, tensor db size: {}".format(
-                                dim_size, dim, db_dims_dict[dim].keys()))
+                            raise ValueError("Invalid update step {} for dim {},"
+                                             "tensor db size: {}".format(dim_size, dim,
+                                                                         db_dims_dict[dim].keys()))
                     else:
                         if init_db[dim] != dim_size:
                             db_dims_dict[dim][init_db[dim]] = 1
@@ -160,8 +162,8 @@ class KaplaCostModel:
         return upper_fetches
 
     @functools.lru_cache(maxsize=1024)
-    def bufshr_redundant_iter(self, gbuf_upd_dims, gbuf_iter_times, regf_upd_dims, regf_iter_times, regf_bl_ord,
-                              g_redundant_iters, opt_out_bufshr):
+    def bufshr_redundant_iter(self, gbuf_upd_dims, gbuf_iter_times, regf_upd_dims, regf_iter_times,
+                              regf_bl_ord, g_redundant_iters, opt_out_bufshr):
         bufshr_rdt_iters = [1 for _ in range(de.NUM)]
 
         for g_upd_dims, iter_time in zip(gbuf_upd_dims, gbuf_iter_times):
@@ -180,10 +182,10 @@ class KaplaCostModel:
             if all(outter_encounted_flag):
                 break
             index = ordered_len + regf_bl_ord.index(order)
+            if regf_iter_times[index] == 1:
+                continue
             for dim, _ in regf_upd_dims[index]:
                 for dce in range(de.NUM):
-                    # if (dim in DATA_LIST[dce]) and (regf_iter_times[index] > 1):
-                    # outter_encounted_flag[dce] = True
                     if dim in self.tdm.data_list[dce]:
                         outter_encounted_flag[dce] = True
             for dce in range(de.NUM):
@@ -193,6 +195,15 @@ class KaplaCostModel:
         # Judge if one data related dims are trivial.
         # If all the dims are trivial, then the rotrnd is 0.
         is_trivial = [True for _ in range(de.NUM)]
+        for index in range(ordered_len):
+            trvl = (regf_iter_times[index] == 1)
+            if trvl:
+                continue
+            for dim, _ in regf_upd_dims[index]:
+                for dce in range(de.NUM):
+                    if dim in self.tdm.data_list[dce]:
+                        is_trivial[dce] = False
+
         for order in range(len(regf_bl_ord)):
             index = ordered_len + regf_bl_ord.index(order)
             trvl = (regf_iter_times[index] == 1)
@@ -202,11 +213,18 @@ class KaplaCostModel:
                 for dce in range(de.NUM):
                     if dim in self.tdm.data_list[dce]:
                         is_trivial[dce] = False
+
         for dce in range(de.NUM):
             if (bufshr_rdt_iters[dce] == ((g_redundant_iters[dce] + 1) // 2 if dce == self.rw_data
                     else g_redundant_iters[dce])) or \
-                    opt_out_bufshr or \
+                    opt_out_bufshr[dce] or \
                     is_trivial[dce]:
+                # print("* data {} bufshr_rdt_iter is eliminated:".format(dce))
+                # print("rw_data: {}".format(self.rw_data))
+                # print("bufshr_rdt_iter: {}".format(bufshr_rdt_iters[dce]))
+                # print("g_redundant_iter: {}".format(g_redundant_iters[dce]))
+                # print("opt_out_bufshr: {}".format(opt_out_bufshr))
+                # print("is_trivial: {}".format(is_trivial))
                 bufshr_rdt_iters[dce] = 0
         return tuple(bufshr_rdt_iters)
 
@@ -233,7 +251,8 @@ class KaplaCostModel:
                 dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num
             else:
                 _, shr_node_num, avg_fwd_dist, avg_rot_dist = bufshr
-                dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num / shr_node_num
+                dram_accesses[dce] = sum(unit_accesses[dce]) * rdt_iter * logical_node_num / \
+                                     shr_node_num
                 if options.hw_access_forwarding:
                     fwd_hops[dce] = sum(unit_accesses[dce]) * rdt_iter * avg_fwd_dist * (
                                 shr_node_num - 1) * logical_node_num / \
@@ -245,8 +264,9 @@ class KaplaCostModel:
 
         return dram_accesses, fwd_hops, buf_shr_hops
 
-    def analyze_regf_level_access(self, unit_accesses, redundant_iters, logical_dim, remote_sharings,
-                                  temporal_sharings, upper_iter_num, upper_repl_num):
+    def analyze_regf_level_access(self, unit_accesses, redundant_iters, logical_dim,
+                                  remote_sharings, temporal_sharings, upper_iter_num,
+                                  upper_repl_num):
         logical_node_num = logical_dim[0] * logical_dim[1]
         fetches = [0 for _ in range(de.NUM)]
         gbuf_accesses = [0 for _ in range(de.NUM)]
@@ -254,8 +274,8 @@ class KaplaCostModel:
         for dce in range(de.NUM):
             fetches[dce] = redundant_iters[dce] * upper_iter_num[dce]
             fetches[dce] = 2 * fetches[dce] - 1 if dce == self.rw_data else fetches[dce]
-            # If temporal sharing is not empty, only consider temporal sharings because rempte sharings
-            # are contained in temporal sharing.
+            # If temporal sharing is not empty, only consider temporal sharings because rempte
+            # sharings are contained in temporal sharing.
             if len(temporal_sharings) > 0:
                 for uac, tmpshr in zip(unit_accesses[dce], temporal_sharings[dce]):
                     fetch_time = logical_node_num
@@ -277,8 +297,10 @@ class KaplaCostModel:
                     noshr_node_num -= shr_node_num * group_num
                 fetch_time += noshr_node_num
 
-                gbuf_accesses[dce] = sum(unit_accesses[dce]) * fetch_time * upper_repl_num * fetches[dce]
-                itcn_accesses[dce] = sum(unit_accesses[dce]) * logical_node_num * upper_repl_num * fetches[dce]
+                gbuf_accesses[dce] = sum(unit_accesses[dce]) * fetch_time * upper_repl_num * \
+                                     fetches[dce]
+                itcn_accesses[dce] = sum(unit_accesses[dce]) * logical_node_num * upper_repl_num * \
+                                     fetches[dce]
 
         return gbuf_accesses, itcn_accesses
 
@@ -287,9 +309,9 @@ class KaplaCostModel:
         init_datas = []
         for init_data_tp in init_data_tuple:
             init_datas.append(dict(init_data_tp))
-        local_sharings = []  # (data type, node_nums, avg_hop_dist)
-        remote_sharings = []  # (data_type, node_nums, avg_hop_dist)
-        temporal_sharings = []  # (data_update_size, node_nums, avg_hops_dist)
+        local_sharings = []  # (data type, shr_node_nums, fwd_dist, rot_dist)
+        remote_sharings = []  # (data_type, shr_node_grp_dict)
+        temporal_sharings = []  # (node_shr_dict0, node_shr_dict1, ...)
 
         stack_dir = []
         if phy_dims.w > phy_dims.h:
@@ -325,15 +347,6 @@ class KaplaCostModel:
         if blk_level == 0:
             # At GBUF level only nalyze local sharing, considering dist.
             for didx, data_dims in enumerate(self.tdm.data_list):
-                # discnt_dim = set()
-                # shr_node_region = [1, 1]
-                # for s_idx, s_dims in enumerate(stacks_dims):
-                #     sdir = stack_dir[s_idx]
-                #     if len(set(data_dims) & set(s_dims)) == 0 and sdir not in discnt_dim:
-                #         shr_node_region[sdir] *= stacks_repls[s_idx]
-                #     else:
-                #         discnt_dim.add(sdir)
-
                 shr_node_region = [1, 1]
                 nbr_dist = [1, 1]
                 started = False
@@ -349,24 +362,15 @@ class KaplaCostModel:
 
                 avg_nbr_dist = sum(nbr_dist) / 2
 
-                # Allow discontinuous sharing.
-                # shr_node_region = [1, 1]
-                # for s_idx, s_dims in enumerate(stacks_dims):
-                #     sdir = stack_dir[s_idx]
-                #     if len(set(data_dims) & set(s_dims)) == 0:
-                #         shr_node_region[sdir] *= stacks_repls[s_idx]
-
                 if any(d > 1 for d in shr_node_region):
                     dist = self.get_avg_dist_in_region(shr_node_region)
-                    fwd_dist = avg_nbr_dist * ((shr_node_region[0] - 1) // 2 + (shr_node_region[1] - 1) // 2) / 2
+                    fwd_dist = avg_nbr_dist * ((shr_node_region[0] - 1) // 2 + \
+                                               (shr_node_region[1] - 1) // 2) / 2
                     shr_node_nums = shr_node_region[0] * shr_node_region[1]
-                    # rotation follows an zig-zag way.
-                    # if shr_node_region[1] % 2 == 0:
-                    #     head2tail_dist = shr_node_region[1] - 1 + shr_node_region[0] - 1
-                    # else:
-                    #     head2tail_dist = shr_node_region[1] - 1
-                    head2tail_dist = avg_nbr_dist * (shr_node_region[1] - 1 + shr_node_region[0] - 1)
-                    rot_dist = avg_nbr_dist * (head2tail_dist + shr_node_nums - 1) * (shr_node_nums - 1) / shr_node_nums
+                    head2tail_dist = avg_nbr_dist * (shr_node_region[1] - 1 + shr_node_region[0] -
+                                                     1)
+                    rot_dist = avg_nbr_dist * (head2tail_dist + shr_node_nums - 1) * \
+                               (shr_node_nums - 1) / shr_node_nums
                     local_sharings.append((didx, shr_node_nums, fwd_dist, rot_dist))
         elif blk_level == 1:
             # At REGF level analyze all possible sharings, without considering dist.
@@ -421,8 +425,6 @@ class KaplaCostModel:
         return logical_dim, local_sharings, remote_sharings, temporal_sharings
 
     def solve_same_pairs(self, equations, variable_idxs, stacks_repls, diffs=None):
-        # print(equations)
-        # print(variable_idxs)
         if diffs is None:
             diffs = [0 for _ in equations]
         stack_num = len(stacks_repls)
@@ -436,10 +438,10 @@ class KaplaCostModel:
         def _node_retrieve(node_pair):
             s = tuple(map(node_pair.get, s_variables))
             t = tuple(map(node_pair.get, t_variables))
-            vs = tuple(
-                sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
-            vt = tuple(
-                sum(c * t[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in zip(equations, variable_idxs))
+            vs = tuple(sum(c * s[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in
+                       zip(equations, variable_idxs))
+            vt = tuple(sum(c * t[idx] for c, idx in zip(coefs, vidxs)) for coefs, vidxs in
+                       zip(equations, variable_idxs))
             if vs < vt:
                 return [s, ], vs
             elif vs > vt:
@@ -448,7 +450,8 @@ class KaplaCostModel:
                 return [s, t], vs
 
         def _create_eq_func(cfs, diff):
-            return lambda *vars: sum(cfs[i] * (vars[2 * i] - vars[2 * i + 1]) for i in range(len(vars) // 2)) == diff
+            return lambda *vars: sum(cfs[i] * (vars[2 * i] - vars[2 * i + 1]) for i in
+                                     range(len(vars) // 2)) == diff
 
         _exclude_self_func = \
             lambda *vars: any(vars[i] != vars[i + 1] for i in range(0, len(vars), 2))
@@ -508,7 +511,6 @@ class KaplaCostModel:
 
     def seg_time_estimation(self, network, segment, seg_times, real_cstr_dict):
         bat_ngrp = 0
-
         dram_time = 0
         seg_layer_idx = dict()
         seg_timing = list()
@@ -557,18 +559,12 @@ class KaplaCostModel:
                             start = p_timing[3]
                     ts_xb = max(ts_xb, start)
                 td_xb = max(td_xb, ts_xb + layer_t)
-                # print("layer_name: {}".format(layer_name))
-                # print("layer_t: {}, ofm_ngrp: {}, ts_xb: {}, td_xb: {}".format(layer_t, ofm_ngrp, ts_xb, td_xb))
                 seg_timing[sp_idx].append((layer_t, ofm_ngrp, ts_xb, td_xb))
                 seg_layer_idx[layer_name] = (sp_idx, tm_idx)
 
         critical_time = max(tlist[-1][3] - tlist[0][2] for tlist in seg_timing)
         node_time = max((tlist[-1][3] + critical_time * (bat_ngrp - 1)) // bat_ngrp
                         for tlist in seg_timing)
-        # print("critical_time: {}".format(critical_time))
-        # print("bat_ngrp: {}".format(bat_ngrp))
-        # print("node_time: {}".format(node_time))
-
         total_time = max(node_time, dram_time)
 
         return node_time, dram_time

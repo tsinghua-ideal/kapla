@@ -107,7 +107,6 @@ class RowStationary(object):
                         lcnt[dim] = 1
                     lcnt["N"] = util.idivc(self.workload["N"], self.repls["N"])
                     lcnt["K"] = util.idivc(self.workload["K"], self.repls["K"])
-                    # lcnt["C"] = util.idivc(self.workload["C"], self.repls["C"] * self.conv_strds[2])
                     lcnt["C"] = 1
 
                     cnt_loops = util.prod(lcnt.values())
@@ -122,7 +121,6 @@ class RowStationary(object):
 
                     locc["N"] = 1. * self.workload["N"] / (self.repls["N"] * lcnt["N"])
                     locc["K"] = 1. * self.workload["K"] / (self.repls["K"] * lcnt["K"])
-                    # locc["C"] = 1. * self.workload["C"] / (self.repls["C"] * lcnt["C"])
                     locc["C"] = 1.
 
                     gbuf_unit_tensor = dict()
@@ -198,7 +196,6 @@ class RowStationary(object):
                 for fact_repl_w in util.factorize(self.repl.w, 2):
                     self.repls["N"] = min(fact_repl_h[0] * fact_repl_w[0], self.workload["N"])
                     self.repls["C"] = min(fact_repl_h[1] * fact_repl_w[1], self.workload["C"])
-                    # self.repls["K"] = self.repls["C"]
 
                     lcnt = dict()
                     for dim in NN_DIM_LIST:
@@ -271,7 +268,8 @@ class RowStationary(object):
                 regf_updates.append(("Xi", self.conv_strds[0], "Xo", 1))
                 # We simply require a unitpass to calc the full ofm.
                 if self.fold.w > 1:
-                    regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo", self.logic_region.w))
+                    regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo",
+                                         self.logic_region.w))
                 if self.fold.h > 1:
                     regf_updates.append(("S", self.logic_region.h, "Yi", self.logic_region.h))
 
@@ -280,7 +278,8 @@ class RowStationary(object):
                 # construct unit_ops
                 unit_ops = self.workload["R"]
 
-                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
+                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, \
+                      self.repls
             elif self.layer_type == lte.LOCAL:
                 # construct stack
                 regf_stacks = []
@@ -299,13 +298,15 @@ class RowStationary(object):
                 if self.workload["R"] > 1:
                     regf_updates.append(("Xi", self.conv_strds[0], "Xo", 1))
                     if self.fold.w > 1:
-                        regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo", self.logic_region.w))
+                        regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo",
+                                             self.logic_region.w))
                     if self.fold.h > 1:
                         regf_updates.append(("S", self.logic_region.h, "Yi", self.logic_region.h))
                 else:
                     regf_updates.append(("Xi", self.conv_strds[0], "Xo", 1))
                     if self.fold.w > 1:
-                        regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo", self.logic_region.w))
+                        regf_updates.append(("Yi", self.conv_strds[1] * self.logic_region.w, "Yo",
+                                             self.logic_region.w))
                     if self.fold.h > 1:
                         regf_updates.append(("S", self.logic_region.h, "Yi", self.logic_region.h))
                     regf_updates.append(("C", self.conv_strds[2], "K", 1))
@@ -318,7 +319,8 @@ class RowStationary(object):
                 else:
                     unit_ops = self.conv_strds[2]
 
-                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
+                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, \
+                      self.repls
             elif self.layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
                 # construct stack
                 regf_stacks = []
@@ -334,7 +336,8 @@ class RowStationary(object):
                 regf_updates.append(("Xo", self.conv_strds[0], "Xi", 1))
                 # We simply require a unitpass to calc the full ofm.
                 if self.fold.w > 1:
-                    regf_updates.append(("Yo", self.conv_strds[1] * self.logic_region.w, "Yi", self.logic_region.w))
+                    regf_updates.append(("Yo", self.conv_strds[1] * self.logic_region.w, "Yi",
+                                         self.logic_region.w))
                 if self.fold.h > 1:
                     regf_updates.append(("S", self.logic_region.h, "Yo", self.logic_region.h))
 
@@ -343,7 +346,8 @@ class RowStationary(object):
                 # construct unit_ops
                 unit_ops = self.workload["R"]
 
-                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
+                yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, \
+                      self.repls
             elif self.layer_type == lte.LOCAL_BACK_H:
                 regf_stacks = []
                 regf_stacks.append(("Yo", self.conv_strds[1], "Yi", 1, self.logic_region.w))

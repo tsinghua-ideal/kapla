@@ -1,14 +1,15 @@
 import functools
 import operator
-import itertools
-from constraint import Problem
 
 import nn_dataflow.core.loop_enum as le
 import nn_dataflow.core.data_category_enum as de
-import nn_dataflow.core.mem_hier_enum as me
-
 from nn_dataflow import util
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer
+
+
+class SearchMethodEnum():
+    KAPLA_SEARCHER = 0
+    ML_SEARCHER = 1
+    RANDOM_SEARCHER = 2
 
 
 class LayerTypeEnum():
@@ -41,7 +42,8 @@ pe = ParallelEnum()
 
 class RSTensorDimMap(object):
     '''
-    Provide mappings and conversions between data types, loop types and loop dimensions.
+    Provide mappings and conversions between data types, loop types and loop dimensions in
+    Row-stationary array mapping.
     '''
     def __init__(self):
         self.data_list = [["C", "K", "R", "S"], ["N", "C", "Xi", "Yi"], ["N", "K", "Xo", "Yo"]]
@@ -188,7 +190,6 @@ class RSTensorDimMap(object):
 
             if layer_type == lte.LOCAL_BACK_H:
                 tensor_dims["K"] = tensor_dims["C"] * conv_strds[2]
-        # return frozenset(tensor_dims.items())
         return tensor_dims
 
     def get_tensor_size(self, layer_type, tensor_dim):
@@ -225,9 +226,9 @@ class RSTensorDimMap(object):
 
 
 class SystolicTensorDimMap(object):
-    '''
+    """
     Provide mappings and conversions between data types, loop types and loop dimensions.
-    '''
+    """
     def __init__(self):
         self.data_list = [["C", "F", "K"], ["N", "C", "F", "XY"], ["N", "K", "XY"]]
         self.loop_list = [[["C"], ["K"], ["N", "XY"]],

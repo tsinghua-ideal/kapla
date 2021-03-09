@@ -7,7 +7,7 @@ MLP-L
 PRIME, 2016
 '''
 
-NN = Network('MLP-L')
+NN = Network('MLP-LBP')
 
 NN.set_input_layer(InputLayer(784, 1))
 

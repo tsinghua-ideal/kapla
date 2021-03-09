@@ -25,7 +25,7 @@ ResNet-50
 He, Zhang, Ren, and Sun, 2015
 '''
 
-NN = Network('ResNet')
+NN = Network('ResNetBP')
 
 NN.set_input_layer(InputLayer(3, 224))
 

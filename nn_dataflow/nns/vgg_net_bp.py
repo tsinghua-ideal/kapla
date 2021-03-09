@@ -8,7 +8,7 @@ VGGNet-16 Back-prop Version.
 Simonyan and Zisserman, 2014
 '''
 
-NN = Network('VGG')
+NN = Network('VGGBP')
 
 NN.set_input_layer(InputLayer(3, 224))
 

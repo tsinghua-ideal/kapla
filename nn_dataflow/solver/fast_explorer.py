@@ -10,7 +10,8 @@ from nn_dataflow.core import mem_hier_enum as me
 from nn_dataflow.core import partition
 from nn_dataflow import util
 from nn_dataflow.core import BufShrScheme
-from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackActLayer, ConvBackWeightLayer
+from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackActLayer, \
+    ConvBackWeightLayer
 from nn_dataflow.core.map_strategy import MapStrategyEyeriss
 from nn_dataflow.core import NodeRegion
 from nn_dataflow.core import PhyDim2
@@ -54,8 +55,7 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
     handler_list = []
 
     for idx, segment in enumerate(ordered_segments):
-        r = apply_func(estimate_seg_cost, (segment, network, options,
-                                           cost))
+        r = apply_func(estimate_seg_cost, (segment, network, options, cost))
         handler_list.append(r)
 
     seg_cost_list = list(map(retrieve_func, handler_list))
@@ -76,13 +76,11 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
             cur_cands = list(opt_segments[prev_layer])
 
         # Update candidate costs.
-        cur_cands = [(cand[0] + min_cost, cand[1] + [idx])
-                     for cand in cur_cands]
+        cur_cands = [(cand[0] + min_cost, cand[1] + [idx]) for cand in cur_cands]
 
         # Update dp tracker.
         last_layer = segment.seg[-1][-1]
-        opt_segments[last_layer] = sorted(
-            opt_segments[last_layer] + cur_cands)[:num_top_segs]
+        opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[:num_top_segs]
 
     seg_set = set()
     for cost_seg in opt_segments[ordered_layer_list[-1]]:
@@ -132,13 +130,13 @@ def estimate_seg_cost(segment, network, options, cost):
         return min_cost
 
     # Sequentially search constraints.
-    # As we check topifm/ofm/bat satisfiability during the cost calculation, we
-    # cannot assume a single point dividing invalid/valid constraints. So
-    # advanced search methods cannot use.
+    # As we check topifm/ofm/bat satisfiability during the cost calculation, we cannot assume a
+    # single point dividing invalid/valid constraints. So advanced search methods cannot use.
     min_cost = float('inf')
     for cstr, _ in segment.gen_constraint():
-        if cstr[0][0].topbat != 0 and not segment_occp_is_valid(segment.seg, segment.network, segment.batch_size,
-                                                                cstr, segment.alloc):
+        if cstr[0][0].topbat != 0 and not segment_occp_is_valid(segment.seg, segment.network,
+                                                                segment.batch_size, cstr,
+                                                                segment.alloc):
             continue
         min_cost = _estimate_per_cstr_cost(cstr)
         if min_cost < float('inf'):
@@ -152,8 +150,8 @@ def gen_partition_list(layer, batch_size, resource, constraint, cost, options, e
     Generate the best partition schemes that are preferred to schedule.
     """
     return SortedIterator(
-        partition.gen_partition(layer, batch_size, resource.proc_region.dim,
-                                options, guaranteed=True),
+        partition.gen_partition(layer, batch_size, resource.proc_region.dim, options,
+                                guaranteed=True),
         counter=explore_n_parts,
         key=lambda part: estimate_layer_cost(layer, batch_size, part, resource,
                                              constraint, cost, options))
@@ -210,9 +208,8 @@ def _estimate_layer_occp(layer, batch_size, resource, constraint):
         top_ifm_ofm_cands = []
 
         # This is an upper bound of the product of topifm and topofm.
-        top_io = util.idivc(
-            layer.nifm * layer.nofm,
-            _estimate_buf_ifm_ofm_lb(layer, buf_bat, resource))
+        top_io = util.idivc(layer.nifm * layer.nofm,
+                            _estimate_buf_ifm_ofm_lb(layer, buf_bat, resource))
 
         # Require one of topifm and topofm must be 1, unless both are
         # given from the constraint.

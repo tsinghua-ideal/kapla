@@ -42,6 +42,7 @@ class KaplaSolver:
         self.ntops = ntops
         self.ilp = InterLayerPipeline(network, batch_size, resource)
         self.ordered_layer_list = self.ilp.ordered_layer_list()
+        print('***Report {}'.format(self.network))
         self.selected_segments = self.solve_segment(explore_n_seg_sets=4)
         self.initial_layout_idx = 0
 
@@ -97,18 +98,21 @@ class KaplaSolver:
                     # Filter out off-frontier constraints.
                     if any(all(h >= fh for h, fh in zip(hints, fhints)) for fhints in frontier):
                         continue
-                    print("-- constraint: {}".format(constraint))
+                    # print("-- constraint: {}".format(constraint))
+                    constraint_counter += 1
                     cur_nndf = prev_nndf.copy()
                     seg_df, cost_dict, seg_time, cur_nndf, total_cost = \
                         self.solve_segment_df(seg, allocation, constraint, cur_nndf)
-                    print(seg_df)
-                    print(cost_dict)
-                    print(total_cost)
-                    print("")
+                    # print(seg_df)
+                    # print(cost_dict)
+                    # print(total_cost)
+                    # print("")
                     if len(seg_df) == 0:
                         continue
                     frontier.add(hints)
                     seg_dfs.append((seg_df, cost_dict, seg_time, cur_nndf, total_cost))
+                print('Origin cstr num: {}'.format(len(tuple(seg.gen_constraint()))))
+                print('Pruned cstr num: {}'.format(constraint_counter))
 
                 # Select best seg df.
                 if len(seg_dfs) == 0:
@@ -136,6 +140,8 @@ class KaplaSolver:
         selected_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
                                             self.unit_cost, self.options,
                                             explore_n_seg_sets=explore_n_seg_sets)
+        print('Origin seg num: {}'.format(sum([len(l) for l in segments.values()])))
+        print('Pruned seg num: {}'.format(sum([len(l) for l in selected_segments.values()])))
         # selected_segments = segments
         return selected_segments
 
@@ -180,7 +186,7 @@ class KaplaSolver:
                 for prev_layer, _ in cstr.update_dict.items():
                     topofm = cstr_collections[prev_layer].topofm
                 cur_cstr = SimpleCstr(topbat, topifm, topofm)
-                print("layer_name: {}".format(layer_name))
+                # print("layer_name: {}".format(layer_name))
                 ifmap_layout = cur_nndf.fmap_layout(self.network.prevs(layer_name))
                 fwd_data_region = fwd_data_region_dict.get((sp_idx, tm_idx))
                 if fwd_data_region is not None:
@@ -209,12 +215,12 @@ class KaplaSolver:
                 seg_times[sp_idx].append(layer_time)
                 total_cost += sum(cost_dict.values())
 
-                print("total_cost: {}".format(sum(cost_dict.values())))
-                print(accesses_result)
-                print(noc_hops)
-                print(cost_dict)
-                print(sched_vars)
-                print(sched_result)
+                # print("total_cost: {}".format(sum(cost_dict.values())))
+                # print(accesses_result)
+                # print(noc_hops)
+                # print(cost_dict)
+                # print(sched_vars)
+                # print(sched_result)
 
         # Estimate the segment's total time.
         seg_total_time = self.cost_model.seg_time_estimation(self.network, segment, seg_times,

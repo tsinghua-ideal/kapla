@@ -1290,7 +1290,7 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                     min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part, conv_strds,
                                       loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords, unit_ops, resource, buf_sharing,
                                       accesses_result)
-                    min_layer_df = layer_rearrange(tdm, layer_type, gbuf_tensor_dims, gbuf_stack, sorted_gbuf_updates,
+                    min_layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack, sorted_gbuf_updates,
                                                    regf_tensor_dims, regf_stack,
                                                    sorted_regf_updates, buf_sharing)
                     min_total_cost = total_cost

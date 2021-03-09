@@ -8,7 +8,7 @@ GoogLeNet
 ILSVRC 2014
 '''
 
-NN = Network('GoogLeNet')
+NN = Network('GoogLeNetBP')
 
 NN.set_input_layer(InputLayer(3, 224))
 

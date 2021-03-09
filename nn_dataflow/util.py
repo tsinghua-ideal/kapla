@@ -14,8 +14,8 @@ You should have received a copy of the Modified BSD-3 License along with this
 program. If not, see <https://opensource.org/licenses/BSD-3-Clause>.
 """
 
+import math, random
 from functools import reduce
-import math
 from operator import mul
 
 '''
@@ -301,3 +301,15 @@ def reverse_high(pos, length, fil, strd):
     else:
         return math.floor(pos * 1.0 / strd)
 
+
+def random_collect(sequence, prob):
+    result_list = []
+    sequence = tuple(sequence)
+    if len(sequence) == 0:
+        return result_list
+    for item in sequence:
+        if random.uniform(0.0, 1.0) < prob:
+            result_list.append(item)
+    if len(result_list) == 0:
+        result_list.append(random.choice(sequence))
+    return result_list

@@ -227,6 +227,8 @@ class Systolic(object):
             base_updates.append(("F", 1))
 
             unit_ops = self.conv_strds[2]
+        else:
+            raise TypeError("Unsupported layer type: {}".format(self.layer_type))
 
         return loopcnt, regf_repls, regf_unit_tensor, gbuf_unit_tensor, base_stacks, \
                base_updates, origin_stack_step_dict, unit_ops
