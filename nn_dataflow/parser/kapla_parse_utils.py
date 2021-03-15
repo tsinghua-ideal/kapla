@@ -5,7 +5,8 @@ from nn_dataflow.core import PhyDim2, NodeRegion, Resource, Option, Cost
 import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
 from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, \
-    LocalRegionLayer, LocalRegionBackLayer
+    LocalRegionLayer, LocalRegionBackLayer, DepthwiseConvolutionLayer, \
+    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from nn_dataflow import util
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
@@ -168,7 +169,9 @@ def layer2workload(array_mapping, layer, batch_size):
         layer_tensor['Yi'] = layer.wifm
         layer_tensor['Xo'] = layer.hofm
         layer_tensor['Yo'] = layer.wofm
-        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
+        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                              DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                              DepthwiseConvolutionBackWeightLayer)):
             layer_tensor['R'] = layer.hfil
             layer_tensor['S'] = layer.wfil
         elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
@@ -179,7 +182,9 @@ def layer2workload(array_mapping, layer, batch_size):
         layer_tensor['C'] = layer.nifm
         layer_tensor['K'] = layer.nofm
         layer_tensor['XY'] = layer.hofm * layer.wofm
-        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)):
+        if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                              DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                              DepthwiseConvolutionBackWeightLayer)):
             layer_tensor['F'] = max(layer.wtrd, layer.wfil) * max(layer.htrd, layer.hfil)
         elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
             layer_tensor['F'] = max(layer.wtrd, layer.wreg) * max(layer.htrd, layer.hreg)
@@ -235,7 +240,7 @@ def part_workload(array_mapping, part, layer, batch_size):
     pdims = part.pdims
     layer_tensor = dict()
     if array_mapping == ame.ROW_STATIONARY:
-        if isinstance(layer, (ConvLayer, LocalRegionLayer)):
+        if isinstance(layer, (ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer)):
             layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
             layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
             layer_tensor["Xo"] = util.idivc(layer.wofm, pdims[pe.OFMP].w)
@@ -252,7 +257,15 @@ def part_workload(array_mapping, part, layer, batch_size):
                 layer_tensor["S"] = layer.hreg
                 layer_tensor["Xi"] = (layer_tensor["Xo"] - 1) * layer.wtrd + layer.wreg
                 layer_tensor["Yi"] = (layer_tensor["Yo"] - 1) * layer.htrd + layer.hreg
-        elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+            elif isinstance(layer, DepthwiseConvolutionLayer):
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+                layer_tensor["R"] = layer.wfil
+                layer_tensor["S"] = layer.hfil
+                layer_tensor["Xi"] = (layer_tensor["Xo"] - 1) * layer.wtrd + layer.wfil
+                layer_tensor["Yi"] = (layer_tensor["Yo"] - 1) * layer.htrd + layer.hfil
+        elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                                DepthwiseConvolutionBackActLayer,
+                                DepthwiseConvolutionBackWeightLayer)):
             layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
             layer_tensor["Xi"] = util.idivc(layer.wifm, pdims[pe.OFMP].w)
             layer_tensor["Yi"] = util.idivc(layer.hifm, pdims[pe.OFMP].h)
@@ -271,6 +284,14 @@ def part_workload(array_mapping, part, layer, batch_size):
                 layer_tensor["S"] = layer.hreg
                 layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wreg
                 layer_tensor["Yo"] = (layer_tensor["Yi"] - 1) * layer.htrd + layer.hreg
+            elif isinstance(layer, (DepthwiseConvolutionBackActLayer,
+                                    DepthwiseConvolutionBackWeightLayer)):
+                layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+                layer_tensor["R"] = layer.wfil
+                layer_tensor["S"] = layer.hfil
+                layer_tensor["Xo"] = (layer_tensor["Xi"] - 1) * layer.wtrd + layer.wfil
+                layer_tensor["Yo"] = (layer_tensor["Yi"] - 1) * layer.htrd + layer.hfil
         else:
             raise TypeError("Unsupported layer type: {}".format(type(layer)))
     elif array_mapping == ame.SYSTOLIC:
@@ -292,7 +313,7 @@ def part_workload(array_mapping, part, layer, batch_size):
 
 def construct_stack(array_mapping, layer_type, part, workload):
     stacks = []
-    if layer_type in (lte.CONV, lte.LOCAL):
+    if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
         for pae in reversed(part.order):
             pdim = part.pdims[pae]
             if pae == pe.OUTP:
@@ -301,7 +322,7 @@ def construct_stack(array_mapping, layer_type, part, workload):
                         stacks.append(("K", workload["K"], pdim.w))
                     if pdim.h != 1:
                         stacks.append(("K", pdim.w * workload["K"], pdim.h))
-                elif layer_type == lte.LOCAL:
+                elif layer_type in (lte.LOCAL, lte.DW_CONV):
                     if pdim.w != 1:
                         stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
                     if pdim.h != 1:
@@ -328,7 +349,8 @@ def construct_stack(array_mapping, layer_type, part, workload):
                         stacks.append(("XY", workload["XY"], pdim.w))
                     if pdim.h != 1:
                         stacks.append(("XY", workload["XY"] * pdim.w, pdim.h))
-    elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+    elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                        lte.DW_CONV_H, lte.DW_CONV_W):
         if array_mapping == ame.SYSTOLIC:
             raise TypeError("SYSTOLIC not supports back-prop layer.")
         for pae in reversed(part.order):
@@ -339,7 +361,7 @@ def construct_stack(array_mapping, layer_type, part, workload):
                         stacks.append(("K", workload["K"], pdim.w))
                     if pdim.h != 1:
                         stacks.append(("K", pdim.w * workload["K"], pdim.h))
-                elif layer_type == lte.LOCAL_BACK_H:
+                elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
                     if pdim.w != 1:
                         stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
                     if pdim.h != 1:
@@ -351,7 +373,7 @@ def construct_stack(array_mapping, layer_type, part, workload):
                         stacks.append(("C", workload["C"], pdim.w))
                     if pdim.h != 1:
                         stacks.append(("C", pdim.w * workload["C"], pdim.h))
-                elif layer_type == lte.LOCAL_BACK_H:
+                elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
                     if pdim.w != 1:
                         stacks.append(("C", workload["C"], "K", workload["K"], pdim.w))
                     if pdim.h != 1:
@@ -410,13 +432,20 @@ def ident_layer_type(layer):
         layer_type = lte.CONV_BACK_W
     elif isinstance(layer, LocalRegionBackLayer):
         layer_type = lte.LOCAL_BACK_H
+    elif isinstance(layer, DepthwiseConvolutionLayer):
+        layer_type = lte.DW_CONV
+    elif isinstance(layer, DepthwiseConvolutionBackActLayer):
+        layer_type = lte.DW_CONV_H
+    elif isinstance(layer, DepthwiseConvolutionBackWeightLayer):
+        layer_type = lte.DW_CONV_W
     else:
         raise TypeError("Unsupport layer type: {}".format(type(layer)))
     return layer_type
 
 
 def get_conv_strds(layer_type, layer):
-    if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+    if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV, lte.DW_CONV_H,
+                      lte.DW_CONV_W):
         conv_strds = (layer.wtrd, layer.htrd, 1)
     elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
         conv_strds = (layer.wtrd, layer.htrd, layer.ntrd)

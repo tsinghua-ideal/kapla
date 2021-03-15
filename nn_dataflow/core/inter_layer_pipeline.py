@@ -16,7 +16,8 @@ program. If not, see <https://opensource.org/licenses/BSD-3-Clause>.
 
 import itertools
 
-from .layer import ConvLayer
+from .layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, DepthwiseConvolutionLayer, \
+                   DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .network import Network
 from .pipeline_segment import PipelineSegment
 from .resource import Resource
@@ -221,7 +222,9 @@ class InterLayerPipeline():
         for layer_name in self.network:
             layer = self.network[layer_name]
 
-            if isinstance(layer, ConvLayer):
+            if isinstance(layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                                  DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                                  DepthwiseConvolutionBackWeightLayer)):
                 dag_vertex_set.append((layer_name,))
 
             else:

@@ -15,10 +15,13 @@ class SearchMethodEnum():
 class LayerTypeEnum():
     CONV = 0
     LOCAL = 1
-    CONV_BACK_H = 2
-    LOCAL_BACK_H = 3
-    CONV_BACK_W = 4
-    NUM = 5
+    DW_CONV = 2
+    CONV_BACK_H = 3
+    LOCAL_BACK_H = 4
+    CONV_BACK_W = 5
+    DW_CONV_H = 6
+    DW_CONV_W = 7
+    NUM = 8
 
 lte = LayerTypeEnum()
 
@@ -51,15 +54,21 @@ class RSTensorDimMap(object):
         # For different layer type, we have different loop-dimension mappings.
         self.loop_list = [[["C"], ["K"], ["N", "Yo", "Xo"]],
                           [["K"], ["K"], ["N", "Yo", "Xo"]],
+                          [["K"], ["K"], ["N", "Yo", "Xo"]],
                           [["C"], ["K"], ["N", "Yi", "Xi"]],
                           [["C"], ["C"], ["N", "Yi", "Xi"]],
-                          [["C"], ["K"], ["N", "Yi", "Xi"]]]
+                          [["C"], ["K"], ["N", "Yi", "Xi"]],
+                          [["C"], ["C"], ["N", "Yi", "Xi"]],
+                          [["C"], ["C"], ["N", "Yi", "Xi"]]]
 
         self.part_list = [[["K"], ["Yo", "Xo"], ["N"], ["C"]],
                           [["K"], ["Yo", "Xo"], ["N"], ["K"]],
+                          [["K"], ["Yo", "Xo"], ["N"], ["K"]],
                           [["K"], ["Yi", "Xi"], ["N"], ["C"]],
                           [["C"], ["Yi", "Xi"], ["N"], ["C"]],
-                          [["K"], ["Yi", "Xi"], ["N"], ["C"]]]
+                          [["K"], ["Yi", "Xi"], ["N"], ["C"]],
+                          [["C"], ["Yi", "Xi"], ["N"], ["C"]],
+                          [["C"], ["Yi", "Xi"], ["N"], ["C"]]]
 
         self.dim_set = set()
         for dl in self.data_list:
@@ -75,7 +84,7 @@ class RSTensorDimMap(object):
                 irr_dims = self.loop_list[layer_type][le.OFM]
             elif dtype == de.OFM:
                 irr_dims = self.loop_list[layer_type][le.IFM]
-        elif layer_type in (1, 3):
+        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W):
             if dtype == de.FIL:
                 irr_dims = self.loop_list[layer_type][le.BAT]
             elif dtype in (de.IFM, de.OFM):
@@ -95,7 +104,7 @@ class RSTensorDimMap(object):
                 rlvt_dims = self.loop_list[layer_type][le.IFM] + self.loop_list[layer_type][le.BAT]
             elif dtype == de.OFM:
                 rlvt_dims = self.loop_list[layer_type][le.OFM] + self.loop_list[layer_type][le.BAT]
-        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W):
             if dtype == de.FIL:
                 rlvt_dims = self.loop_list[layer_type][le.OFM]
             elif dtype == de.IFM:
@@ -170,7 +179,7 @@ class RSTensorDimMap(object):
         return tuple(irr_dtypes)
 
     def format_tensor_dim(self, layer_type, tensor_dims, conv_strds):
-        if layer_type in (lte.CONV, lte.LOCAL):
+        if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
             for dim in self.dim_set - {"Xi", "Yi"}:
                 if dim not in tensor_dims:
                     tensor_dims[dim] = 1
@@ -178,9 +187,12 @@ class RSTensorDimMap(object):
             tensor_dims["Xi"] = (tensor_dims["Xo"] - 1) * conv_strds[0] + tensor_dims["R"]
             tensor_dims["Yi"] = (tensor_dims["Yo"] - 1) * conv_strds[1] + tensor_dims["S"]
 
-            if layer_type == lte.LOCAL:
+            if layer_type in (lte.LOCAL,):
                 tensor_dims["C"] = tensor_dims["K"] * conv_strds[2]
-        elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.DW_CONV,):
+                tensor_dims["C"] = tensor_dims["K"]
+        elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H, lte.DW_CONV_H,
+                            lte.DW_CONV_W):
             for dim in self.dim_set - {"Xo", "Yo"}:
                 if dim not in tensor_dims:
                     tensor_dims[dim] = 1
@@ -188,7 +200,7 @@ class RSTensorDimMap(object):
             tensor_dims["Xo"] = (tensor_dims["Xi"] - 1) * conv_strds[0] + tensor_dims["R"]
             tensor_dims["Yo"] = (tensor_dims["Yi"] - 1) * conv_strds[1] + tensor_dims["S"]
 
-            if layer_type == lte.LOCAL_BACK_H:
+            if layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
                 tensor_dims["K"] = tensor_dims["C"] * conv_strds[2]
         return tensor_dims
 
@@ -209,7 +221,8 @@ class RSTensorDimMap(object):
             if dim in pdim_list:
                 rpe = penum
                 break
-        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and rpe == pe.INPP:
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W) \
+                and rpe == pe.INPP:
             rpe = pe.OUTP
 
         return rpe
@@ -220,7 +233,8 @@ class RSTensorDimMap(object):
         for l, dim_list in enumerate(self.loop_list[layer_type]):
             if dim in dim_list:
                 lpe = l
-        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and lpe == le.IFM:
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W) \
+                and lpe == le.IFM:
             lpe = le.OFM
         return lpe
 
@@ -232,8 +246,10 @@ class SystolicTensorDimMap(object):
     def __init__(self):
         self.data_list = [["C", "F", "K"], ["N", "C", "F", "XY"], ["N", "K", "XY"]]
         self.loop_list = [[["C"], ["K"], ["N", "XY"]],
+                          [["K"], ["K"], ["N", "XY"]],
                           [["K"], ["K"], ["N", "XY"]]]
         self.part_list = [[["K"], ["XY"], ["N"], ["C"]],
+                          [["K"], ["XY"], ["N"], ["K"]],
                           [["K"], ["XY"], ["N"], ["K"]]]
 
         self.dim_set = set()
@@ -250,7 +266,7 @@ class SystolicTensorDimMap(object):
                 irr_dims = self.loop_list[layer_type][le.OFM]
             elif dtype == de.OFM:
                 irr_dims = self.loop_list[layer_type][le.IFM]
-        elif layer_type in (1, 3):
+        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W):
             if dtype == de.FIL:
                 irr_dims = self.loop_list[layer_type][le.BAT]
             elif dtype in (de.IFM, de.OFM):
@@ -270,7 +286,7 @@ class SystolicTensorDimMap(object):
                 rlvt_dims = self.loop_list[layer_type][le.IFM] + self.loop_list[layer_type][le.BAT]
             elif dtype == de.OFM:
                 rlvt_dims = self.loop_list[layer_type][le.OFM] + self.loop_list[layer_type][le.BAT]
-        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
+        elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV, lte.DW_CONV_H, lte.DW_CONV_W):
             if dtype == de.FIL:
                 rlvt_dims = self.loop_list[layer_type][le.OFM]
             elif dtype == de.IFM:
@@ -345,7 +361,7 @@ class SystolicTensorDimMap(object):
         return tuple(irr_dtypes)
 
     def format_tensor_dim(self, layer_type, tensor_dims, conv_strds):
-        if layer_type in (lte.CONV, lte.LOCAL):
+        if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
             for dim in self.dim_set:
                 if dim not in tensor_dims:
                     tensor_dims[dim] = 1
@@ -368,7 +384,7 @@ class SystolicTensorDimMap(object):
             if dim in pdim_list:
                 rpe = penum
                 break
-        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and rpe == pe.INPP:
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV) and rpe == pe.INPP:
             rpe = pe.OUTP
 
         return rpe
@@ -379,6 +395,6 @@ class SystolicTensorDimMap(object):
         for l, dim_list in enumerate(self.loop_list[layer_type]):
             if dim in dim_list:
                 lpe = l
-        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H) and lpe == le.IFM:
+        if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H, lte.DW_CONV) and lpe == le.IFM:
             lpe = le.OFM
         return lpe

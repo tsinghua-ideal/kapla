@@ -23,7 +23,9 @@ import nn_dataflow.core.parallel_enum as nndf_pe
 from nn_dataflow.core import InterLayerPipeline, PhyDim2, PartitionScheme, FmapRange, \
         FmapPosition, DataLayout, partition, BufShrScheme, NestedLoopDesc, LoopBlockingScheme, \
         SchedulingResult, NNDataflowScheme, Resource
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer
+from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, \
+        ConvBackWeightLayer, LocalRegionBackLayer, DepthwiseConvolutionBackActLayer, \
+        DepthwiseConvolutionBackWeightLayer
 from nn_dataflow.nns import import_network
 from nn_dataflow.core.node_region import NodeRegion
 
@@ -57,66 +59,10 @@ DATA_LIST = [["C", "K", "R", "S"], ["N", "C", "Xi", "Yi"], ["N", "K", "Xo", "Yo"
 CSTR_LIST = ['topbat', 'topifm', 'topofm']
 
 
-class SimpleCstr(namedtuple('SimpleCstr', CSTR_LIST)):
-    '''
-    Simplified constraint specification.
-    '''
-    def __new__(cls, *args, **kwargs):
-        ntp = super(SimpleCstr, cls).__new__(cls, *args, **kwargs)
-        return ntp
-
-
-class SimpleBufshr():
-    '''
-    Simplified buffer sharing.
-    '''
-    def __init__(self, layer_type, pdims, porders):
-        self.dims = [PhyDim2(1, 1) for _ in range(de.NUM)]
-        if layer_type in (0, 1):
-            self.dims[de.FIL] = pdims[pe.OFMP] * pdims[pe.BATP]
-        elif layer_type in (2, 3):
-            self.dims[de.FIL] = pdims[pe.IFMP] * pdims[pe.BATP]
-
-        if layer_type in (0, 2):
-            self.dims[de.IFM] = pdims[pe.OUTP]
-            self.dims[de.OFM] = pdims[pe.INPP]
-
-    def size(self, dce):
-        return self.dims[dce].size()
-
-
-class SegDfCache():
-    '''
-    Cache segment dataflow and its cost.
-    '''
-    def __init__(self, network):
-        self.seg_df_cache = dict()
-        self.network = network
-
-    def hash_seg_desc(self, segment, allocation, constraint):
-        seg_layers = []
-        for sp in segment:
-            sp_list = []
-            for layer_name in sp:
-                sp_list.append(self.network[layer_name])
-            seg_layers.append(tuple(sp_list))
-        seg_layers = tuple(seg_layers)
-        hash_key = hash((seg_layers, allocation, constraint))
-
-        return hash_key
-
-    def insert_to_cache(self, segment, allocation, constraint, sched_result):
-        hash_key = self.hash_seg_desc(segment, allocation, constraint)
-        self.seg_df_cache[hash_key] = sched_result
-
-    def get_cached_result(self, segment, allocation, constraint):
-        hash_key = self.hash_seg_desc(segment, allocation, constraint)
-        return self.seg_df_cache.get(hash_key, None)
-
-
 class XGBTuner(object):
     """Tuner that uses xgboost as cost model"""
-    def __init__(self, array_mapping, batch_size, unit_cost, options, plan_size=100, num_threads=1, log_interval=50):
+    def __init__(self, array_mapping, batch_size, unit_cost, options, plan_size=100, num_threads=1,
+                 log_interval=50):
         self.cost_model = XGBoostCostModel(n_threads=num_threads,
                                            log_interval=log_interval)
 
@@ -270,64 +216,6 @@ class XGBTuner(object):
         self.best_config = None
         self.best_cost = float('inf')
 
-    # def _construct_design_space(self, layer, batch_size, resource, cur_cstr, array_mapping,
-    #                             unit_cost, options):
-    #     layer_type = ident_layer_type(layer)
-    #     conv_strds = get_conv_strds(layer_type, layer)
-
-    #     partition_list = list(generate_partition(
-    #             layer, batch_size,
-    #             resource.proc_region.dim, self.options,
-    #             guaranteed=True))
-
-    #     array_mapping_list = []
-    #     loop_blocking_array = []
-    #     lbs_part_len = []
-    #     lbs_nld_len = []
-
-    #     for pdims, porders in partition_list:
-    #         gbuf_workload = part_workload(pdims, layer, batch_size)
-    #         if options.hw_gbuf_sharing:
-    #             buf_sharing = SimpleBufshr(layer_type, pdims, porders)
-    #         else:
-    #             buf_sharing = None
-    #         mapping = construct_array_mapping(layer_type, gbuf_workload, array_mapping, resource, conv_strds)
-    #         counter = 0
-    #         for loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, regf_repls in mapping.gen_array_mapping():
-    #             lbs_list = []
-    #             for knobs_tuple, bl_ts, real_cstr in generate_loop_blocking(loopcnt, cur_cstr):
-    #                 regf_tensor_dims = derive_regf_tensor_dim(layer_type, knobs_tuple, bl_ts[BL.REGF+1], unit_size[BL.REGF])
-    #                 gbuf_bl_tp = [bl_a * bl_b for bl_a, bl_b in zip(bl_ts[BL.REGF+1], bl_ts[BL.REGF])]
-    #                 gbuf_tensor_dims = derive_gbuf_tensor_dim(layer_type, knobs_tuple, gbuf_bl_tp, unit_size[BL.GBUF])
-
-    #                 regf_tensor_dims = format_tensor_dim(layer_type, regf_tensor_dims, conv_strds)
-    #                 gbuf_tensor_dims = format_tensor_dim(layer_type, gbuf_tensor_dims, conv_strds)
-    #                 if not (is_valid(layer_type, regf_tensor_dims, resource.size_regf) and
-    #                         is_valid(layer_type, gbuf_tensor_dims, resource.size_gbuf, buf_sharing)):
-    #                     continue
-    #                 for bl_ords in itertools.product(*[itertools.permutations(range(len(knobs_tuple))) for _ in range(BL.NUM)]):
-    #                     outermost = len(knobs_tuple) - 1
-    #                     if "N" in knobs_tuple:
-    #                         if bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("N"):
-    #                             continue
-    #                         outermost -= 1
-    #                     if "C" in knobs_tuple:
-    #                         if (cur_cstr.topifm > 1) and bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("C"):
-    #                             continue
-    #                     if "K" in knobs_tuple:
-    #                         if (cur_cstr.topofm > 1) and bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("K"):
-    #                             continue
-
-    #                     lbs_list.append((knobs_tuple, bl_ts, real_cstr, bl_ords))
-    #             lbs_nld_len.append(len(lbs_list))
-    #             loop_blocking_array.extend(lbs_list)
-    #             array_mapping_list.append((loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, regf_repls))
-    #             counter += len(lbs_list)
-    #         lbs_part_len.append(counter)
-
-    #     return DesignSpace(partition_list, array_mapping_list, loop_blocking_array, lbs_part_len,
-    #                        lbs_nld_len, resource, cur_cstr, unit_cost, options)
-
     def _construct_design_space(self, layer, resource, constraint):
         layer_type = ident_layer_type(layer)
         conv_strds = get_conv_strds(layer_type, layer)
@@ -346,15 +234,20 @@ class XGBTuner(object):
                 buf_sharing = BufShrScheme(resource.proc_region, part, layer.data_loops())
             else:
                 buf_sharing = None
-            mapping = construct_array_mapping(layer_type, parted_workload, self.array_mapping, resource,
-                                              conv_strds)
+            mapping = construct_array_mapping(layer_type, parted_workload, self.array_mapping,
+                                              resource, conv_strds)
             counter = 0
-            for loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, regf_repls in mapping.gen_array_mapping():
+            for loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, \
+                    regf_repls in mapping.gen_array_mapping():
                 lbs_list = []
-                for knobs_tuple, bl_ts, real_cstr in generate_loop_blocking(self.array_mapping, layer_type, loopcnt, constraint):
-                    regf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, bl_ts[BL.REGF+1], unit_size[BL.REGF])
-                    gbuf_bl_tp = [bl_a * bl_b for bl_a, bl_b in zip(bl_ts[BL.REGF+1], bl_ts[BL.REGF])]
-                    gbuf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, gbuf_bl_tp, unit_size[BL.GBUF])
+                for knobs_tuple, bl_ts, real_cstr in \
+                        generate_loop_blocking(self.array_mapping, layer_type, loopcnt, constraint):
+                    regf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, bl_ts[BL.REGF+1],
+                                                         unit_size[BL.REGF])
+                    gbuf_bl_tp = [bl_a * bl_b for bl_a, bl_b in
+                                  zip(bl_ts[BL.REGF+1], bl_ts[BL.REGF])]
+                    gbuf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, gbuf_bl_tp,
+                                                         unit_size[BL.GBUF])
 
                     regf_tensor_dims = self.tdm.format_tensor_dim(layer_type, regf_tensor_dims, conv_strds)
                     gbuf_tensor_dims = self.tdm.format_tensor_dim(layer_type, gbuf_tensor_dims, conv_strds)
@@ -437,16 +330,24 @@ class XGBTuner(object):
                 self.layer, self.batch_size, resource.proc_region, part,
                 filter_nodes, ifmap_layout, ofmap_layout, self.options)
 
-            loopcnt, unit_size, logic_region, mapping_fold, mapping_repls, regf_stack, origin_regf_update, unit_ops, regf_repls = array_mapping
+            loopcnt, unit_size, logic_region, mapping_fold, mapping_repls, regf_stack, \
+                origin_regf_update, unit_ops, regf_repls = array_mapping
             knobs_tuple, bl_ts, real_cstr = bl_ts_ord
 
             if self.options.hw_gbuf_sharing:
                 buf_sharing = BufShrScheme(resource.proc_region, part, self.layer.data_loops())
             else:
                 buf_sharing = None
-            r = apply_func(_get_layer_df_preprocess, (self.array_mapping, self.layer_type, self.conv_strds, frozenset(gbuf_workload.items()), part, buf_sharing, frozenset(loopcnt.items()), tuple(frozenset(us.items()) for us in unit_size),
-                logic_region, mapping_fold, frozenset(mapping_repls.items()), tuple(regf_stack), tuple(origin_regf_update), unit_ops, frozenset(regf_repls.items()), tuple(knobs_tuple),
-                bl_ts, real_cstr, constraint, resource, unit_nhops, self.unit_cost, self.options))
+            r = apply_func(_get_layer_df_preprocess,
+                           (self.array_mapping, self.layer_type, self.conv_strds,
+                            frozenset(gbuf_workload.items()), part, buf_sharing,
+                            frozenset(loopcnt.items()), \
+                            tuple(frozenset(us.items()) for us in unit_size),
+                            logic_region, mapping_fold, frozenset(mapping_repls.items()),
+                            tuple(regf_stack), tuple(origin_regf_update), unit_ops,
+                            frozenset(regf_repls.items()), tuple(knobs_tuple),
+                            bl_ts, real_cstr, constraint, resource, unit_nhops, self.unit_cost,
+                            self.options))
             collection.append(r)
 
         for (layer_df, cost_dict, layer_time, real_cstr, layer_vars) in retrieve_func:
@@ -460,9 +361,9 @@ class XGBTuner(object):
 
 
 def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workload, part, buf_sharing,
-                                 loopcnt, unit_size, logic_region, mapping_fold, froz_mapping_repls, regf_stack, origin_regf_update,
-                                 unit_ops, regf_repls, knobs_tuple, bl_ts, real_cstr,
-                                 constraint, resource, unit_nhops, unit_cost, options):
+                             loopcnt, unit_size, logic_region, mapping_fold, froz_mapping_repls,
+                             regf_stack, origin_regf_update, unit_ops, regf_repls, knobs_tuple,
+                             bl_ts, real_cstr, constraint, resource, unit_nhops, unit_cost, options):
 
     if array_mapping == ame.ROW_STATIONARY:
         tdm = RSTensorDimMap()
@@ -516,9 +417,6 @@ def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workloa
     if not (is_valid(tdm, layer_type, regf_tensor_dims, resource.size_regf) and
             is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf, shr_node_num)):
         return min_layer_df, min_cost_dict, min_layer_time, min_real_cstr, min_layer_vars
-    # opt_out_bufshr = False
-    # if is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf):
-    #     opt_out_bufshr = True
 
     opt_out_bufshr = [False for _ in range(de.NUM)]
     _shr_node = [1 for _ in range(de.NUM)]
@@ -600,7 +498,7 @@ def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workloa
                     if any(dim in dp for dp in dps) and (g_iter_times[upd_idx] != 1):
                         trivial_iter = False
 
-            if layer_type == lte.CONV_BACK_W:
+            if layer_type in (lte.CONV_BACK_W, lte.DW_CONV_W):
                 trivial_iter = False
 
             if trivial_iter:
@@ -702,16 +600,16 @@ def generate_loop_blocking(array_mapping, layer_type, loopcnt, constraint):
     if array_mapping == ame.ROW_STATIONARY:
         if layer_type == lte.CONV:
             dim_list = ["N", "K", "C", "Yo"]
-        elif layer_type == lte.LOCAL:
+        elif layer_type in (lte.LOCAL, lte.DW_CONV):
             dim_list = ["N", "K", "Yo"]
         elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
             dim_list = ["N", "K", "C", "Yi"]
-        elif layer_type == lte.LOCAL_BACK_H:
+        elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
             dim_list = ["N", "C", "Yi"]
     elif array_mapping == ame.SYSTOLIC:
         if layer_type == lte.CONV:
             dim_list = ["N", "K", "C", "XY"]
-        elif layer_type == lte.LOCAL:
+        elif layer_type in (lte.LOCAL, lte.DW_CONV):
             dim_list = ["N", "K", "XY"]
 
     for dim in dim_list:
@@ -765,7 +663,7 @@ def derive_tensor_dim(layer_type, knobs_tuple, bl_t, unit_size):
         for kidx, knob in enumerate(knobs_tuple):
             repl_size.setdefault(knob, 1)
             repl_size[knob] *= bl_t[kidx]
-    elif layer_type == lte.LOCAL:
+    elif layer_type in (lte.LOCAL, lte.DW_CONV):
         for kidx, knob in enumerate(knobs_tuple):
             if knob == "K":
                 repl_size.setdefault("K", 1)
@@ -775,7 +673,7 @@ def derive_tensor_dim(layer_type, knobs_tuple, bl_t, unit_size):
             else:
                 repl_size.setdefault(knob, 1)
                 repl_size[knob] *= bl_t[kidx]
-    elif layer_type == lte.LOCAL_BACK_H:
+    elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
         for kidx, knob in enumerate(knobs_tuple):
             if knob == "C":
                 repl_size.setdefault("K", 1)
@@ -802,7 +700,7 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
             if dim in existed_upd_dims:
                 continue
             results.append((dim, stacked_dims[dim]))
-    elif layer_type == lte.LOCAL:
+    elif layer_type in (lte.LOCAL, lte.DW_CONV):
         for dim, t in zip(knobs_tuple, bl_t):
             if dim in existed_upd_dims:
                 continue
@@ -812,7 +710,7 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
                 results.append(("C", stacked_dims[dim] * conv_strds[2], "K", stacked_dims[dim]))
             else:
                 results.append((dim, stacked_dims[dim]))
-    elif layer_type == lte.LOCAL_BACK_H:
+    elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
         for dim, t in zip(knobs_tuple, bl_t):
             if dim in existed_upd_dims:
                 continue
@@ -828,4 +726,5 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
 
 
 def sort_update(unordered_updates, bl_ord, origin_updates=()):
-    return origin_updates + tuple(x for x, _ in sorted(zip(unordered_updates[-len(bl_ord):], bl_ord), key=lambda item: item[1]))
+    return origin_updates + tuple(x for x, _ in \
+        sorted(zip(unordered_updates[-len(bl_ord):], bl_ord), key=lambda item: item[1]))

@@ -19,7 +19,8 @@ from . import loop_enum as le
 from . import mem_hier_enum as me
 from .. import util
 from .layer import Layer, ConvLayer, LocalRegionLayer, ConvBackActLayer, \
-    LocalRegionBackLayer, ConvBackWeightLayer
+    LocalRegionBackLayer, ConvBackWeightLayer, DepthwiseConvolutionLayer, \
+    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .nested_loop_desc import NestedLoopDesc
 from .phy_dim2 import PhyDim2
 
@@ -89,18 +90,19 @@ class MapStrategyEyeriss(MapStrategy):
             self.ops_lpe = self.layer.nreg * self.layer.wreg * self.layer.wifm
             self.dim_lpeset = PhyDim2(h=self.layer.hreg, w=self.layer.hifm)
             cnt_lpeset = self.batch_size * self.layer.nifm
+        elif isinstance(self.layer, DepthwiseConvolutionLayer):
+            self.ops_lpe = self.layer.wfil * self.layer.wofm
+            self.dim_lpeset = PhyDim2(self.layer.hfil, self.layer.hofm)
+            cnt_lpeset = self.batch_size * self.layer.nofm
+        elif isinstance(self.layer, (DepthwiseConvolutionBackActLayer,
+                                     DepthwiseConvolutionBackWeightLayer)):
+            self.ops_lpe = self.layer.wfil * self.layer.wifm
+            self.dim_lpeset = PhyDim2(h=self.layer.hfil, w=self.layer.hifm)
         else:
             raise TypeError('MapEyeriss: unrecognized layer type {}.'
                             .format(type(self.layer)))
 
         ops_logic_total = self.ops_lpe * self.dim_lpeset.size() * cnt_lpeset
-        if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
-            print("batch_size: {}".format(self.batch_size))
-            print("wfil: {}, wofm: {}".format(self.layer.wfil, self.layer.wofm))
-            print("dim_lpeset: {}".format(self.dim_lpeset))
-            print("cnt_lpeset: {}".format(cnt_lpeset))
-            print("ops_logic_total: {}".format(ops_logic_total))
-            print("total_ops: {}".format(self.layer.total_ops(self.batch_size)))
         assert ops_logic_total == self.layer.total_ops(self.batch_size)
 
         # Physical PE set through replication and folding.
@@ -253,7 +255,10 @@ class MapStrategyEyeriss(MapStrategy):
             util.assert_float_eq_int(
                 nld.total_access_at_of(me.DRAM, de.FIL),
                 self.layer.total_filter_size()
-                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)) else 0,
+                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                                           DepthwiseConvolutionLayer,
+                                           DepthwiseConvolutionBackActLayer,
+                                           DepthwiseConvolutionBackWeightLayer)) else 0,
                 'MapEyeriss: total access at DRAM for FIL {} is incorrect.'
                 .format(nld.total_access_at_of(me.DRAM, de.FIL)))
             util.assert_float_eq_int(
@@ -270,7 +275,10 @@ class MapStrategyEyeriss(MapStrategy):
             util.assert_float_eq_int(
                 nld.unit_access_at_of(me.REGF, de.FIL) * util.prod(nld.loopcnt),
                 self.layer.total_ops(self.batch_size) * self.occupancy
-                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer)) else 0,
+                if isinstance(self.layer, (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                                           DepthwiseConvolutionLayer,
+                                           DepthwiseConvolutionBackActLayer,
+                                           DepthwiseConvolutionBackWeightLayer)) else 0,
                 'MapEyeriss: unit access at REGF for FIL {} is incorrect.'
                 .format(nld.unit_access_at_of(me.REGF)))
             util.assert_float_eq_int(
@@ -603,6 +611,107 @@ class MapStrategyEyeriss(MapStrategy):
             sz_regf[de.IFM] = 1
             sz_regf[de.OFM] = buflayer.wreg * buflayer.nreg
 
+        elif isinstance(self.layer, DepthwiseConvolutionLayer):
+            # A unitpass processes all folded fils, and one folded ifm/ofm.
+            # Row size is not affected since a row is within one PE.
+            acclayer = DepthwiseConvolutionLayer(
+                1,
+                (1. * self.layer.hofm / self.fold.w, self.layer.wofm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+
+            buflayer = DepthwiseConvolutionLayer(
+                1,
+                (util.idivc(self.layer.hofm, self.fold.w), self.layer.wofm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+            
+            ops = acclayer.total_ops()
+
+            time = flpesets_per_unitpass * self.ops_lpe
+
+            # Data are accessed once from DRAM into gbuf.
+            access[me.DRAM][de.FIL] = acclayer.total_filter_size()
+            access[me.DRAM][de.IFM] = acclayer.total_ifmap_size()
+            access[me.DRAM][de.OFM] = acclayer.total_ofmap_size()
+
+            access[me.GBUF][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.GBUF][de.IFM] = access[me.DRAM][de.IFM] \
+                    * flpesets_per_unitpass
+            access[me.GBUF][de.OFM] = access[me.DRAM][de.OFM] \
+                    * flpesets_per_unitpass
+
+            # All data from/to regf go through itcn.
+            # Data per PE * number of PEs * number of rounds (flpsets).
+            access[me.ITCN][de.FIL] = acclayer.wfil * self.dim_flpeset.size() \
+                    * flpesets_per_unitpass
+            access[me.ITCN][de.IFM] = acclayer.wifm * self.dim_flpeset.size() \
+                    * flpesets_per_unitpass
+            access[me.ITCN][de.OFM] = acclayer.wofm * self.dim_flpeset.size() \
+                    * flpesets_per_unitpass
+
+            # regf access is based on num of ops.
+            access[me.REGF][de.FIL] = ops
+            access[me.REGF][de.IFM] = ops
+            access[me.REGF][de.OFM] = ops
+
+            sz_gbuf[de.FIL] = buflayer.total_filter_size()
+            sz_gbuf[de.IFM] = buflayer.total_ifmap_size()
+            sz_gbuf[de.OFM] = buflayer.total_ofmap_size()
+
+            # Entire fil row of one folded fil per PE.
+            sz_regf[de.FIL] = buflayer.wfil
+            # For 1D conv in each PE, ifm and ofm are both accessed in a
+            # streaming fashion (sliding window). Only capturing wfil ifm
+            # elements and 1 ofm element is adequate.
+            sz_regf[de.IFM] = buflayer.wfil
+            sz_regf[de.OFM] = 1
+
+            # Since we choose to only store a sliding window of data, the
+            # data may be fetched multipled times.
+            self._regf_reusable[de.IFM] = (buflayer.wfil == buflayer.hifm)
+            self._regf_reusable[de.OFM] = (buflayer.wofm == 1)
+            self._regf_reusable[de.FIL] = (self.fold.h == 1)
+
+        elif isinstance(self.layer, (DepthwiseConvolutionBackActLayer,
+                                     DepthwiseConvolutionBackWeightLayer)):
+            acclayer = DepthwiseConvolutionLayer(
+                1,
+                (1. * self.layer.hifm / self.fold.w, self.layer.wifm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+            buflayer = DepthwiseConvolutionLayer(
+                1,
+                (util.idivc(self.layer.hifm, self.fold.w), self.layer.wifm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+
+            ops = acclayer.total_ops()
+            time = flpesets_per_unitpass * self.ops_lpe
+
+            # Data are accessed once from DRAM into gbuf.
+            access[me.DRAM][de.FIL] = acclayer.total_filter_size()
+            access[me.DRAM][de.IFM] = acclayer.total_ofmap_size()
+            access[me.DRAM][de.OFM] = acclayer.total_ifmap_size()
+
+            access[me.GBUF][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.GBUF][de.IFM] = access[me.DRAM][de.IFM] * flpesets_per_unitpass
+            access[me.GBUF][de.OFM] = access[me.DRAM][de.OFM] * flpesets_per_unitpass
+
+            access[me.ITCN][de.FIL] = acclayer.wfil * self.dim_flpeset.size() * flpesets_per_unitpass
+            access[me.ITCN][de.IFM] = acclayer.wofm * self.dim_flpeset.size() * flpesets_per_unitpass
+            access[me.ITCN][de.OFM] = acclayer.wifm * self.dim_flpeset.size() * flpesets_per_unitpass
+
+            access[me.REGF] = [ops] * de.NUM
+
+            sz_gbuf[de.FIL] = buflayer.total_filter_size()
+            sz_gbuf[de.IFM] = buflayer.total_ofmap_size()
+            sz_gbuf[de.OFM] = buflayer.total_ifmap_size()
+
+            sz_regf[de.FIL] = buflayer.wfil
+            sz_regf[de.IFM] = 1
+            sz_regf[de.OFM] = buflayer.wfil
+
         else:
             raise TypeError("map_strategy: Invalid layer type: {}".format(self.layer.__class__.__name__))
 
@@ -732,6 +841,34 @@ class MapStrategyEyeriss(MapStrategy):
                 repl_cnt[de.OFM] = ofms
 
                 yield tuple(lcnt), locc, repl_size, repl_cnt
+
+        elif isinstance(self.layer, (DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                                     DepthwiseConvolutionBackWeightLayer)):
+            # repl is only used for ofmaps.
+            ofms = self.repl.size()
+
+            ofms = min(ofms, self.layer.nofm)
+            repl_size = ofms
+
+            # Loop trip counts.
+            lcnt = [float('nan')] * le.NUM
+            # Loop ifm is corresponding to loop ofm, so always 1.
+            lcnt[le.IFM] = 1
+            lcnt[le.OFM] = util.idivc(self.layer.nofm, ofms)
+            lcnt[le.BAT] = self.batch_size * self.fold.w
+
+            # Loop occupancy.
+            locc = [1.] * le.NUM
+            locc[le.OFM] = 1. * self.layer.nofm / ofms / lcnt[le.OFM]
+
+            # Replicated data counts.
+            repl_cnt = [0] * de.NUM
+            repl_cnt[de.FIL] = ofms
+            repl_cnt[de.IFM] = ofms  # ifm and ofm is one-to-one.
+            repl_cnt[de.OFM] = ofms
+
+            yield tuple(lcnt), locc, repl_size, repl_cnt
+
         else:
             raise TypeError("map_strategy: Invalid layer type: {}".format(self.layer.__class__.__name__))
 
@@ -972,13 +1109,6 @@ class MapStrategySystolic(MapStrategy):
                 (1. * self.layer.hofm / fold_hofm, 1. * self.layer.wofm / fold_wofm),
                 (self.layer.hfil, self.layer.wfil),
                 strd=(self.layer.htrd, self.layer.wtrd))
-            print("acclayer:")
-            print(acclayer)
-            print("repl:")
-            print(self.repl)
-            print("fold:")
-            print(self.fold)
-            print(self.dim_flpeset)
 
             ops = acclayer.total_ops()
             time = self.ops_lpe

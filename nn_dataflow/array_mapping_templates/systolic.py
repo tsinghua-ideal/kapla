@@ -93,7 +93,7 @@ class Systolic(object):
                     regf_unit_tensor["XY"] = 1
 
                     yield gbuf_unit_tensor, regf_unit_tensor, lcnt, locc
-        elif self.layer_type == lte.LOCAL:
+        elif self.layer_type in (lte.LOCAL, lte.DW_CONV):
             self.repls["N"] = min(self.repl.h * self.repl.w, self.workload["N"])
             lcnt = dict()
             for dim in NN_DIM_LIST:
@@ -148,7 +148,7 @@ class Systolic(object):
 
                 yield lcnt, usize, self.logic_region, regf_stacks, regf_updates, unit_ops, self.repls
 
-            elif self.layer_type == lte.LOCAL:
+            elif self.layer_type in (lte.LOCAL, lte.DW_CONV):
                 regf_stacks = []
                 regf_stacks.append(("K", 1, "F", 1, self.logic_region.w))
                 regf_stacks.append(("XY", 1, "F", 1, self.logic_region.h))
@@ -196,7 +196,7 @@ class Systolic(object):
             base_updates.append(("F", 1))
 
             unit_ops = 1
-        elif self.layer_type == lte.LOCAL:
+        elif self.layer_type in (lte.LOCAL, lte.DW_CONV):
             loopcnt = dict()
             for dim in NN_DIM_LIST:
                 loopcnt[dim] = 1

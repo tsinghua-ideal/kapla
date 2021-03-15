@@ -30,7 +30,9 @@ from .int_range import IntRange
 from .inter_layer_pipeline import InterLayerPipeline
 from .layer import Layer, InputLayer, ConvLayer, FCLayer, \
         LocalRegionLayer, PoolingLayer, EltwiseLayer, \
-        ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer, FCBackActLayer, PoolingBackLayer, EltwiseBackLayer
+        ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer, FCBackActLayer, \
+        FCBackWeightLayer, PoolingBackLayer, EltwiseBackLayer, DepthwiseConvolutionLayer, \
+        DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .loop_blocking_scheme import LoopBlockingScheme
 from .map_strategy import MapStrategy, MapStrategyEyeriss
 from .nested_loop_desc import NestedLoopDesc

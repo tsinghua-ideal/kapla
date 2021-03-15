@@ -27,7 +27,8 @@ from .. import util
 from .cost import Cost
 from .data_layout import DataLayout
 from .fmap_range import FmapPosition, FmapRange
-from .layer import Layer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer
+from .layer import Layer, ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer, \
+        DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .map_strategy import MapStrategy
 from .resource import Resource
 from .scheduling_constraint import SchedulingConstraint
@@ -265,15 +266,15 @@ class Scheduling():
         # Partitioned layer.
         p_layer, p_batch_size, p_occ = part.part_layer(self.layer,
                                                        self.batch_size)
-        print('part: {}, layer: {}, p_layer: {}, p_batch_size: {}'.format(part, self.layer, p_layer, p_batch_size))
         # Mapping strategy.
         reverse_mapping = False
-        if isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+        if isinstance(self.layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                                   DepthwiseConvolutionBackActLayer,
+                                   DepthwiseConvolutionBackWeightLayer)):
             reverse_mapping = True
         map_strategy = self.map_strategy_class(p_layer, p_batch_size, p_occ,
                                                resource.dim_array,
                                                reverse_mapping=reverse_mapping)
-        print('repl: {}, layer.nofm: {}'.format(map_strategy.repl, map_strategy.layer.nofm), flush=True)
 
         # Explore PE array mapping schemes for partitioned layer.
         for nested_loop_desc in map_strategy.gen_nested_loop_desc():
@@ -320,7 +321,8 @@ class Scheduling():
         cost_itcn = sum(access[me.ITCN]) * self.cost.mem_hier_at(me.ITCN)
         cost_regf = sum(access[me.REGF]) * self.cost.mem_hier_at(me.REGF)
 
-        assert not math.isnan(cost_op + cost_access + cost_noc + cost_static)
+        assert not math.isnan(cost_op + cost_access + cost_noc + cost_static), \
+            f'lbs {lbs.nld}, mac_op {self.cost.mac_op}, ops {lbs.ops}, access {lbs.access, lbs.remote_gbuf_access}, total_nhops {total_nhops}, time{lbs.time}'
 
         # Overall stats.
         scheme['cost'] = cost_op + cost_access + cost_noc + cost_static

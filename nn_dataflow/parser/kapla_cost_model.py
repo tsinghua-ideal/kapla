@@ -5,7 +5,9 @@ from constraint import Problem
 
 from nn_dataflow import util
 import nn_dataflow.core.data_category_enum as de
-from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer
+from nn_dataflow.core.layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, \
+        DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer, \
+        DepthwiseConvolutionBackWeightLayer
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 from nn_dataflow.array_mapping_templates.tensor_dim_map import SystolicTensorDimMap
@@ -522,7 +524,9 @@ class KaplaCostModel:
                 layer_t = max(proc_t, dram_t, bus_t)
                 dram_time += dram_t
                 is_conv = isinstance(network[layer_name],
-                                     (ConvLayer, ConvBackActLayer, ConvBackWeightLayer))
+                                     (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                                      DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                                      DepthwiseConvolutionBackWeightLayer))
                 real_cstr = real_cstr_dict[layer_name]
                 if not bat_ngrp:
                     bat_ngrp = real_cstr.topbat

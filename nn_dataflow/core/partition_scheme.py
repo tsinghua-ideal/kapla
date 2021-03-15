@@ -21,7 +21,8 @@ from . import parallel_enum as pe
 from .. import util
 from .fmap_range import FmapPosition, FmapRange
 from .layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, \
-    LocalRegionBackLayer
+    LocalRegionBackLayer, DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer, \
+    DepthwiseConvolutionBackWeightLayer
 from .phy_dim2 import PhyDim2
 
 PARTITION_SCHEME_LIST = ['order',
@@ -150,7 +151,9 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
 
         p_nifm = util.idivc(layer.nifm, self.pdims[pe.INPP].size())
         p_nofm = util.idivc(layer.nofm, self.pdims[pe.OUTP].size())
-        if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+        if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                              DepthwiseConvolutionBackActLayer,
+                              DepthwiseConvolutionBackWeightLayer)):
             r_hofm = util.idivc(layer.hifm, self.pdims[pe.OFMP].h)
             r_wofm = util.idivc(layer.wifm, self.pdims[pe.OFMP].w)
         else:
@@ -168,6 +171,12 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
             p_layer = LocalRegionLayer(p_nofm, (p_hofm, p_wofm),
                                        layer.nreg, (layer.hreg, layer.wreg),
                                        strd=(layer.htrd, layer.wtrd))
+        elif isinstance(layer, DepthwiseConvolutionLayer):
+            if self.pdims[pe.INPP].size() > 1:
+                raise ValueError('PartitionScheme: input partitioning is '
+                                 'invalid for LocalRegionLayer.')
+            p_layer = DepthwiseConvolutionLayer(p_nofm, (p_hofm, p_wofm), (layer.hfil, layer.wfil),
+                                                (layer.htrd, layer.wtrd))
         elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer)):
             # print("p_nifm:{}, p_nofm:{}, p_hofm:{}, p_wofm:{}".format(p_nifm, p_nofm, p_hofm, p_wofm))
             # print("INPP:{}, OUTP:{}, OFMP.h:{}, OFMP.w:{}".format(self.pdims[pe.INPP].size(), self.pdims[pe.OUTP].size(), self.pdims[pe.OFMP].h, self.pdims[pe.OFMP].w))
@@ -186,6 +195,15 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
                                        layer.nreg, (layer.hreg, layer.wreg),
                                        strd=(layer.htrd, layer.wtrd),
                                        rw_data=layer.rw_data)
+        elif isinstance(layer, (DepthwiseConvolutionBackActLayer,
+                                DepthwiseConvolutionBackWeightLayer)):
+            if self.pdims[pe.INPP].size() > 1:
+                raise ValueError('PartitionScheme: input partitioning is '
+                                 'invalid for LocalRegionLayer.')
+            r_nofm = util.reverse_high(p_nofm-1, layer.nofm, layer.nreg, layer.ntrd) + 1
+            p_layer = DepthwiseConvolutionLayer(
+                    r_nofm, (r_hofm, r_wofm), (layer.hfil, layer.wfil),
+                    strd=(layer.htrd, layer.wtrd), rw_data=layer.rw_data)
         else:
             raise TypeError('PartitionScheme: unrecognized layer type.')
 

@@ -14,11 +14,11 @@
     "partition_ifmaps": true,
     "partition_interlayer": true,
     "layer_pipeline_time_ovhd": 1e10,
-    "layer_pipeline_max_degree": 1e10,
+    "layer_pipeline_max_degree": 10,
     "layer_pipeline_opt": true,
     "opt_goal": "e",
     "ntops": 1,
-    "nprocesses": 8,
+    "nprocesses": 1,
     "verbose": true
   }
 }

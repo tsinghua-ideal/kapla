@@ -274,6 +274,72 @@ class FCLayer(ConvLayer):
                 'sfil={}'.format(repr((self.hfil, self.wfil)))]))
 
 
+class DepthwiseConvolutionLayer(Layer):
+    '''
+    Depthwise convolution applies a single filter to each input channel.
+    Depthwise convolution is extremely efficient relative to standard convolution.
+    However it only filters input channels and it does not combine them to create new features.
+    '''
+    def __init__(self, nofm, sofm, sfil, strd=1, rw_data=de.OFM):
+        super(DepthwiseConvolutionLayer, self).__init__(nofm, sofm, strd=strd)
+
+        if isinstance(sfil, int):
+            self.hfil = sfil
+            self.wfil = sfil
+        elif len(sfil) == 2:
+            self.hfil = sfil[0]
+            self.wfil = sfil[1]
+        else:
+            raise ValueError('DepthwiseConvolutionLayer: sfil is invalid ({}), '
+                             'needs to be either one integer or '
+                             'a pair of integers'.format(sfil))
+        nifm = self.nofm
+        hifm = self.hfil + (self.hofm - 1) * self.htrd
+        wifm = self.wfil + (self.wofm - 1) * self.wtrd
+        self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = rw_data
+
+    @staticmethod
+    def data_loops():
+        dls = [None] * de.NUM
+        dls[de.FIL] = DataDimLoops(le.OFM)
+        dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
+        dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+        return tuple(dls)
+
+    def input_layer(self):
+        return self.inlayer
+
+    def ops_per_neuron(self):
+        return self.hfil * self.wfil
+
+    def filter_size(self, word_size=1):
+        '''
+        Get size of one weight filter.
+
+        If `word_size` is set to word byte size, return size in bytes.
+        '''
+        return self.hfil * self.wfil * word_size
+
+    def total_filter_size(self, word_size=1):
+        '''
+        Get total size of all weight filters.
+
+        If `word_size` is set to word byte size, return size in bytes.
+        '''
+        return self.nofm * self.filter_size(word_size)
+
+
+    def __repr__(self):
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join([
+                'nofm={}'.format(repr(self.nofm)),
+                'sofm={}'.format(repr((self.hofm, self.wofm))),
+                'sreg={}'.format(repr((self.hfil, self.wfil))),
+                'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+
+
 class LocalRegionLayer(Layer):
     '''
     NN layer which computes on a local region. The layer has no or limited
@@ -728,11 +794,11 @@ class LocalRegionBackLayer(Layer):
             hreg = sreg[0]
             wreg = sreg[1]
         else:
-            raise ValueError('LocalRegionLayer: sreg is invalid ({}), '
+            raise ValueError('LocalRegionBackLayer: sreg is invalid ({}), '
                              'needs to be either one integer or '
                              'a pair of integers'.format(sreg))
         if nreg > 1 and (hreg * wreg) > 1:
-            raise ValueError('LocalRegionLayer: local region cannot be a mix '
+            raise ValueError('LocalRegionBackLayer: local region cannot be a mix '
                              'of both n ({}) and h & w ({}, {})'
                              .format(nreg, hreg, wreg))
         self.nreg = nreg
@@ -750,7 +816,7 @@ class LocalRegionBackLayer(Layer):
                 hro = raw_sofm[0]
                 wro = raw_sofm[1]
             else:
-                raise ValueError('ConvLayer: sfil is invalid ({}), '
+                raise ValueError('LocalRegionBackLayer: sfil is invalid ({}), '
                                  'needs to be either one integer or '
                                  'a pair of integers'.format(raw_sofm))
             assert isinstance(raw_nofm, int), 'invalid raw_nofm: {}'.format(raw_nofm)
@@ -849,3 +915,156 @@ class EltwiseBackLayer(LocalRegionBackLayer):
                 'sofm={}'.format(repr((self.hofm, self.wofm))),
                 'nreg={}'.format(repr(self.nreg))]))
 
+
+class DepthwiseConvolutionBackActLayer(Layer):
+    '''
+    Depthwise convolution layer in back-propagation.
+    '''
+    def __init__(self, nofm, sofm, sfil, strd=1, crop=False, raw_sofm=None, raw_nofm=None):
+        super(DepthwiseConvolutionBackActLayer, self).__init__(nofm, sofm, strd=strd)
+
+        if isinstance(sfil, int):
+            hfil = sfil
+            wfil = sfil
+        elif len(sfil) == 2:
+            hfil = sfil[0]
+            wfil = sfil[1]
+        else:
+            raise ValueError('DepthwiseConvolutionBackLayer: sfil is invalid ({}), '
+                             'needs to be either one integer or '
+                             'a pair of integers'.format(sfil))
+
+        self.hfil = hfil
+        self.wfil = wfil
+        self.crop = crop
+        self.raw_sofm = raw_sofm
+
+        if crop:
+            if isinstance(raw_sofm, int):
+                hro = raw_sofm
+                wro = raw_sofm
+            elif len(raw_sofm) == 2:
+                hro = raw_sofm[0]
+                wro = raw_sofm[1]
+            else:
+                raise ValueError('DepthwiseConvolutionBackLayer: sfil is invalid ({}), '
+                                 'needs to be either one integer or '
+                                 'a pair of integers'.format(raw_sofm))
+            nifm = util.reverse_high(self.nofm-1, raw_nofm, 1, 1) + 1
+            hifm = util.reverse_high(self.hofm-1, hro, self.hfil, self.htrd) + 1
+            wifm = util.reverse_high(self.wofm-1, wro, self.wfil, self.wtrd) + 1
+        else:
+            nifm = self.nofm
+            hifm = (self.hofm - self.hfil) // self.htrd + 1
+            wifm = (self.wofm - self.wfil) // self.wtrd + 1
+
+        self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = de.OFM
+
+        @staticmethod
+        def data_loops():
+            dls = [None] * de.NUM
+            dls[de.FIL] = DataDimLoops(le.OFM)
+            dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
+            dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+            return tuple(dls)
+
+        def input_layer(self):
+            return self.inlayer
+
+        def ops_per_neuron(self):
+            return self.region_size()
+
+        def total_ops(self, batch_size=1):
+            return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
+                                             (self.hfil, self.wfil),
+                                             (self.htrd, self.wtrd)).total_ops(batch_size)
+
+        def region_size(self):
+            return self.hfil * self.wfil
+
+        def __repr__(self):
+            return '{}({})'.format(
+                self.__class__.__name__,
+                ', '.join([
+                    'nofm={}'.format(repr(self.nofm)),
+                    'sofm={}'.format(repr((self.hofm, self.wofm))),
+                    'sfil={}'.format(repr((self.hfil, self.wfil))),
+                    'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+
+
+class DepthwiseConvolutionBackWeightLayer(Layer):
+    '''
+    Depthwise convolution layer in back-propagation.
+    '''
+    def __init__(self, nofm, sofm, sfil, strd=1, crop=False, raw_sofm=None, raw_nofm=None):
+        super(DepthwiseConvolutionBackWeightLayer, self).__init__(nofm, sofm, strd=strd)
+
+        if isinstance(sfil, int):
+            hfil = sfil
+            wfil = sfil
+        elif len(sfil) == 2:
+            hfil = sfil[0]
+            wfil = sfil[1]
+        else:
+            raise ValueError('DepthwiseConvolutionBackLayer: sfil is invalid ({}), '
+                             'needs to be either one integer or '
+                             'a pair of integers'.format(sfil))
+
+        self.hfil = hfil
+        self.wfil = wfil
+        self.crop = crop
+        self.raw_sofm = raw_sofm
+
+        if crop:
+            if isinstance(raw_sofm, int):
+                hro = raw_sofm
+                wro = raw_sofm
+            elif len(raw_sofm) == 2:
+                hro = raw_sofm[0]
+                wro = raw_sofm[1]
+            else:
+                raise ValueError('DepthwiseConvolutionBackLayer: sfil is invalid ({}), '
+                                 'needs to be either one integer or '
+                                 'a pair of integers'.format(raw_sofm))
+            nifm = util.reverse_high(self.nofm-1, raw_nofm, 1, 1) + 1
+            hifm = util.reverse_high(self.hofm-1, hro, self.hfil, self.htrd) + 1
+            wifm = util.reverse_high(self.wofm-1, wro, self.wfil, self.wtrd) + 1
+        else:
+            nifm = self.nofm
+            hifm = (self.hofm - self.hfil) // self.htrd + 1
+            wifm = (self.wofm - self.wfil) // self.wtrd + 1
+
+        self.inlayer = Layer(nifm, (hifm, wifm))
+        self.rw_data = de.FIL
+
+        @staticmethod
+        def data_loops():
+            dls = [None] * de.NUM
+            dls[de.FIL] = DataDimLoops(le.OFM)
+            dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
+            dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+            return tuple(dls)
+
+        def input_layer(self):
+            return self.inlayer
+
+        def ops_per_neuron(self):
+            return self.region_size()
+
+        def total_ops(self, batch_size=1):
+            return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
+                                             (self.hfil, self.wfil),
+                                             (self.htrd, self.wtrd)).total_ops(batch_size)
+
+        def region_size(self):
+            return self.hfil * self.wfil
+
+        def __repr__(self):
+            return '{}({})'.format(
+                self.__class__.__name__,
+                ', '.join([
+                    'nofm={}'.format(repr(self.nofm)),
+                    'sofm={}'.format(repr((self.hofm, self.wofm))),
+                    'sfil={}'.format(repr((self.hfil, self.wfil))),
+                    'strd={}'.format(repr((self.htrd, self.wtrd)))]))

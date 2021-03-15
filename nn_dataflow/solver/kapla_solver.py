@@ -10,7 +10,8 @@ import nn_dataflow.core.parallel_enum as nndf_pe
 from nn_dataflow import util
 from nn_dataflow.core import InterLayerPipeline, PhyDim2, PartitionScheme, FmapRange, \
     FmapPosition, DataLayout, partition, BufShrScheme, NestedLoopDesc, LoopBlockingScheme, \
-    SchedulingResult, NNDataflowScheme, ConvLayer, LocalRegionLayer, NodeRegion
+    SchedulingResult, NNDataflowScheme, ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer, \
+    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer, NodeRegion
 from nn_dataflow.nns import import_network
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
@@ -42,9 +43,10 @@ class KaplaSolver:
         self.ntops = ntops
         self.ilp = InterLayerPipeline(network, batch_size, resource)
         self.ordered_layer_list = self.ilp.ordered_layer_list()
+        print('start solve segment')
         self.selected_segments = self.solve_segment(explore_n_seg_sets=4)
+        print('finish solve segment')
         self.initial_layout_idx = 0
-
         if array_mapping == ame.ROW_STATIONARY:
             self.tdm = RSTensorDimMap()
         elif array_mapping == ame.SYSTOLIC:
@@ -56,7 +58,7 @@ class KaplaSolver:
     def solve_dataflow(self):
         df_tops = defaultdict(lambda: None)
         nndf_tops = {}
-
+        print("solve dataflow.")
         # Since dataflows represented by Kapla directives are unaware of the data layout,in order
         # to elaborate the solved dataflow to fit into the NN Dataflow tool, we randomly peek an
         # initial input layout. In fact, the initial input layout has trivial effect on the
@@ -192,7 +194,8 @@ class KaplaSolver:
                                                           for p in ifmap_layout.parts))
                 # Solve the layer's dataflow.
                 df, real_cstr, cost_dict, layer_time, sched_vars, accesses_result, noc_hops = \
-                    self.solve_layer_df(layer_name, cur_cstr, resource, ifmap_layout, seg_idx, sp_idx, tm_idx)
+                    self.solve_layer_df(layer_name, cur_cstr, resource, ifmap_layout, seg_idx,
+                                        sp_idx, tm_idx)
 
                 if df is None:
                     return dict(), None, None, None, None
@@ -238,7 +241,8 @@ class KaplaSolver:
         self.cost_model.set_cur_layer_type(layer_type)
 
         layer_data_size = [0 for _ in range(de.NUM)]
-        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV, lte.DW_CONV_H,
+                          lte.DW_CONV_W):
             layer_data_size[de.FIL] = layer.total_filter_size()
         layer_data_size[de.IFM] = layer.total_ifmap_size(batch_size=self.batch_size)
         layer_data_size[de.OFM] = layer.total_ofmap_size(batch_size=self.batch_size)
@@ -525,10 +529,11 @@ class KaplaSolver:
             remain_lcnt["K"] = loopcnt["K"]
 
         if self.array_mapping == ame.ROW_STATIONARY:
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 remain_lcnt["Xo"] = loopcnt["Xo"]
                 remain_lcnt["Yo"] = loopcnt["Yo"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                lte.DW_CONV_H, lte.DW_CONV_W):
                 remain_lcnt["Xi"] = loopcnt["Xi"]
                 remain_lcnt["Yi"] = loopcnt["Yi"]
         elif self.array_mapping == ame.SYSTOLIC:
@@ -547,20 +552,20 @@ class KaplaSolver:
 
         for item in mul_iter:
             dim, r = item
-            if (layer_type == lte.LOCAL and dim == "K") or \
-                    (layer_type == lte.LOCAL_BACK_H and dim == "C"):
+            if (layer_type in (lte.LOCAL, lte.DW_CONV) and dim == "K") or \
+                    (layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W) and dim == "C"):
                 gbuf_unit_tensor["C"] *= r
                 gbuf_unit_tensor["K"] *= r
             elif self.array_mapping == ame.ROW_STATIONARY and \
-                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and
-                      dim == "Yi")):
+                    ((layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV) and dim == "Yo") or
+                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                     lte.DW_CONV_H, lte.DW_CONV_W) and dim == "Yi")):
                 gbuf_unit_tensor["Yo"] *= r
                 gbuf_unit_tensor["Yi"] *= r
             elif self.array_mapping == ame.ROW_STATIONARY and \
-                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and
-                      dim == "Xi")):
+                    ((layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV) and dim == "Xo") or
+                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                     lte.DW_CONV_H, lte.DW_CONV_W) and dim == "Xi")):
                 gbuf_unit_tensor["Xo"] *= r
                 gbuf_unit_tensor["Xi"] *= r
             else:
@@ -573,9 +578,10 @@ class KaplaSolver:
             gbuf_iter_dict["N"] = top_bl_ts[le.BAT]
             gbuf_iter_dict["C"] = top_bl_ts[le.IFM]
             gbuf_iter_dict["K"] = top_bl_ts[le.OFM]
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 gbuf_iter_dict["Yo"] = remain_lcnt["Yo"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                lte.DW_CONV_H, lte.DW_CONV_W):
                 gbuf_iter_dict["Yi"] = remain_lcnt["Yi"]
         elif self.array_mapping == ame.SYSTOLIC:
             gbuf_iter_dict["N"] = top_bl_ts[le.BAT]
@@ -814,10 +820,11 @@ class KaplaSolver:
 
         if self.array_mapping == ame.ROW_STATIONARY:
             # Recalculate ifm/ofm.
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 tensor["Xi"] = (tensor["Xo"] - 1) * conv_strds[0] + tensor["R"]
                 tensor["Yi"] = (tensor["Yo"] - 1) * conv_strds[1] + tensor["S"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                lte.DW_CONV_H, lte.DW_CONV_W):
                 tensor["Xo"] = (tensor["Xi"] - 1) * conv_strds[0] + tensor["R"]
                 tensor["Yo"] = (tensor["Yi"] - 1) * conv_strds[1] + tensor["S"]
 
@@ -833,10 +840,11 @@ class KaplaSolver:
 
         if self.array_mapping == ame.ROW_STATIONARY:
             # Recalculate ifm/ofm.
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 tensor["Xi"] = (tensor["Xo"] - 1) * conv_strds[0] + tensor["R"]
                 tensor["Yi"] = (tensor["Yo"] - 1) * conv_strds[1] + tensor["S"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                lte.DW_CONV_H, lte.DW_CONV_W):
                 tensor["Xo"] = (tensor["Xi"] - 1) * conv_strds[0] + tensor["R"]
                 tensor["Yo"] = (tensor["Yi"] - 1) * conv_strds[1] + tensor["S"]
 
@@ -956,16 +964,17 @@ class KaplaSolver:
             workload[dim] = util.idivc(workload[dim], value)
 
         if self.array_mapping == ame.ROW_STATIONARY:
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 workload["Xi"] = (workload["Xo"] - 1) * conv_strds[0] + workload["R"]
                 workload["Yi"] = (workload["Yo"] - 1) * conv_strds[1] + workload["S"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                lte.DW_CONV_H, lte.DW_CONV_W):
                 workload["Xo"] = (workload["Xi"] - 1) * conv_strds[0] + workload["R"]
                 workload["Yo"] = (workload["Yi"] - 1) * conv_strds[1] + workload["S"]
 
-        if layer_type == lte.LOCAL:
+        if layer_type in (lte.LOCAL, lte.DW_CONV):
             workload["C"] = util.idivc(workload["C"], repl_dict.setdefault("K", 1))
-        elif layer_type == lte.LOCAL_BACK_H:
+        elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
             workload["K"] = util.idivc(workload["K"], repl_dict.setdefault("C", 1))
 
         return util.HashableDict(workload)
@@ -989,7 +998,7 @@ class KaplaSolver:
                                             unit_tensor["Yo"]))
                     else:
                         updates.append((dim, unit_tensor[dim]))
-        elif layer_type == lte.LOCAL:
+        elif layer_type in (lte.LOCAL, lte.DW_CONV):
             for order in range(le.NUM):
                 idx = bl_ord.index(order)
                 if idx == le.IFM:
@@ -1021,7 +1030,7 @@ class KaplaSolver:
                                             unit_tensor["Yi"] * conv_strds[1]))
                     else:
                         updates.append((dim, unit_tensor[dim]))
-        elif layer_type == lte.LOCAL_BACK_H:
+        elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
             for order in range(le.NUM):
                 idx = bl_ord.index(order)
                 if idx == le.OFM:
@@ -1108,7 +1117,7 @@ class KaplaSolver:
             repl_list = repl_dict[dim]
             strd = workload.get(dim, 1)
             for repl in repl_list:
-                if layer_type in (lte.CONV, lte.LOCAL):
+                if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                     if self.array_mapping == ame.ROW_STATIONARY and dim == "Yo":
                         yo_stack_idx = None
                         for idx, stack in base_stacks:
@@ -1124,11 +1133,12 @@ class KaplaSolver:
                             stacks[yo_stack_idx] = \
                                 ("Yi", (strd - 1) * conv_strds[1] + workload["S"], "Yo", strd,
                                  origin_repl * repl)
-                    elif dim == "K" and layer_type == 1:
+                    elif dim == "K" and layer_type in (lte.LOCAL, lte.DW_CONV):
                         stacks.append(("C", strd * conv_strds[2], "K", strd, repl))
                     else:
                         stacks.append((dim, strd, repl))
-                elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+                elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H,
+                                    lte.DW_CONV_H, lte.DW_CONV_W):
                     assert self.array_mapping != ame.SYSTOLIC, \
                         "Unsupported layer type: {}".format(layer_type)
                     if dim == "Yi":
@@ -1146,7 +1156,8 @@ class KaplaSolver:
                             stacks[yi_stack_idx] = \
                                 ("Yi", strd, "Yo", (strd - 1) * conv_strds[1] + workload["S"],
                                  origin_repl * repl)
-                    elif dim == "C" and layer_type == 3:
+                    elif dim == "C" and layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H,
+                                                       lte.DW_CONV_W):
                         stacks.append(("C", strd, "K", strd * conv_strds[2], repl))
                     else:
                         stacks.append((dim, strd, repl))
@@ -1185,7 +1196,8 @@ class KaplaSolver:
         # Regfile accesses.
         regf_accesses = [0 for _ in range(de.NUM)]
         flat_iter_times = util.prod(r_iter_times + g_iter_times) * regf_ops_iter
-        if layer_type in (0, 2):
+        if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV, lte.DW_CONV_H,
+                          lte.DW_CONV_W):
             regf_accesses[de.FIL] = unit_ops * flat_iter_times * regf_stack_num * gbuf_stack_num
         regf_accesses[de.IFM] = unit_ops * flat_iter_times * regf_stack_num * gbuf_stack_num
         regf_accesses[de.OFM] = unit_ops * flat_iter_times * regf_stack_num * gbuf_stack_num * 2
@@ -1447,10 +1459,11 @@ class KaplaSolver:
             # To be compatible with nn_dataflow, we need to fold Yo dim into N dim.
             # This fold is using the whole Yo, so we regrad this Yo to be transformed into
             # temporal iterated N.
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 part_workload["Yo"] = util.idivc(part_workload["Yo"], gbuf_iter_dict.get("Yo", 1))
                 fold_w = util.idivc(fold_w, gbuf_iter_dict.get("Yo", 1) * gbuf_stacks.get("Yo", 1))
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
+            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H, lte.DW_CONV_H,
+                                lte.DW_CONV_W):
                 part_workload["Yi"] = util.idivc(part_workload["Yi"], gbuf_iter_dict.get("Yi", 1))
                 fold_w = util.idivc(fold_w, gbuf_iter_dict.get("Yi", 1) * gbuf_stacks.get("Yi", 1))
             part_workload = self.tdm.format_tensor_dim(layer_type, part_workload, conv_strds)
@@ -1494,6 +1507,27 @@ class KaplaSolver:
                 amp_acc_ifm = 1. * acclayer.hifm * fold_w / part_workload["Yo"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_workload["S"], fold_h),
                                       w=util.idivc(part_workload["Yi"], fold_w))
+
+            elif layer_type == lte.DW_CONV:
+                acclayer = DepthwiseConvolutionLayer(
+                    1,
+                    (util.idivc(part_workload["Yo"], fold_w), part_workload["Xo"]),
+                    (part_workload["S"], part_workload["R"]),
+                    strd=(conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * fold_w / part_workload["Yi"]
+                dim_flpeset = PhyDim2(h=util.idivc(part_workload["S"], fold_h),
+                                      w=util.idivc(part_workload["Yo"], fold_w))
+
+            elif layer_type in (lte.DW_CONV_H, lte.DW_CONV_W):
+                acclayer = DepthwiseConvolutionLayer(
+                    1,
+                    (util.idivc(part_workload["Yi"], fold_w), part_workload["Xi"]),
+                    (part_workload["S"], part_workload["R"]),
+                    strd=(conv_strds[1], conv_strds[0]), rw_data=layer.rw_data)
+                amp_acc_ifm = 1. * acclayer.hifm * fold_w / part_workload["Yo"]
+                dim_flpeset = PhyDim2(h=util.idivc(part_workload["S"], fold_h),
+                                      w=util.idivc(part_workload["Yi"], fold_w))
+
             else:
                 raise TypeError("Unsupported layer type {}".format(layer_type))
 
@@ -1527,6 +1561,20 @@ class KaplaSolver:
                 unit_access[me.DRAM][de.FIL] = 0
                 unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["C"] * \
                                                regf_stacks["N"] / amp_acc_ifm
+            elif layer_type == lte.DW_CONV:
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["K"] * \
+                                               regf_stacks["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * regf_stacks["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["K"] * \
+                                               regf_stacks["N"] / amp_acc_ifm
+            elif layer_type in (lte.DW_CONV_H, lte.DW_CONV_W):
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * regf_stacks["C"] * \
+                                               regf_stacks["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * regf_stacks["C"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["C"] * \
+                                               regf_stacks["N"] / amp_acc_ifm
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access[me.GBUF][de.FIL] = unit_access[me.DRAM][de.FIL]
             unit_access[me.GBUF][de.IFM] = unit_access[me.DRAM][de.IFM] * flpesets_per_unitpass
@@ -1537,7 +1585,8 @@ class KaplaSolver:
             unit_access[me.ITCN][de.OFM] = acclayer.wofm * dim_flpeset.size() \
                                            * flpesets_per_unitpass * util.prod(regf_stacks.values())
 
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 unit_access[me.ITCN][de.FIL] = acclayer.wfil * dim_flpeset.size() * \
                                                flpesets_per_unitpass * \
                                                util.prod(regf_stacks.values())
@@ -1555,7 +1604,8 @@ class KaplaSolver:
                 sz_gbuf[de.OFM] /= amp_acc_ifm
 
             sz_regf = [0] * de.NUM
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 sz_regf[de.FIL] = acclayer.wfil
                 sz_regf[de.IFM] = acclayer.wfil
                 sz_regf[de.OFM] = 1
@@ -1566,7 +1616,8 @@ class KaplaSolver:
 
             ops_lpe = acclayer.total_ops() * util.prod(regf_stacks.values())
             loopcnt = (loopcnt[le.IFM], loopcnt[le.OFM], loopcnt[le.BAT])
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 unit_time = acclayer.wfil * acclayer.hfil
                 regf_reusable[de.IFM] = (acclayer.wfil == acclayer.wifm)
             elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
@@ -1641,8 +1692,14 @@ class KaplaSolver:
                 amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
                               layer.hifm / layer.wifm
                 unit_time = layer.nreg * layer.wreg * layer.hreg
+            elif layer_type == lte.DW_CONV:
+                acclayer = DepthwiseConvolutionLayer(
+                    1. * layer.nofm / fold_w,
+                    (fold_x, fold_y),
+                    (layer.hfil, layer.wfil),
+                    strd=(conv_strds[1], conv_strds[0]))
             else:
-                raise TypeError("Invalid")
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access = [[float('nan')] * de.NUM for _ in range(me.NUM)]
             regf_reusable = [False for _ in range(de.NUM)]
@@ -1659,6 +1716,10 @@ class KaplaSolver:
                 unit_access[me.DRAM][de.FIL] = 0
                 unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["K"] * \
                                                regf_stacks["N"] / amp_acc_ifm
+            elif layer_type == lte.DW_CONV:
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * regf_stacks["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * regf_stacks["K"] * \
+                                               regf_stacks["N"] / amp_acc_ifm
             else:
                 raise TypeError("Unsupported layer type {}".format(layer_type))
 
@@ -1670,11 +1731,13 @@ class KaplaSolver:
                                            util.prod(regf_stacks.values())
             unit_access[me.ITCN][de.OFM] = acclayer.total_ofmap_size() * \
                                            util.prod(regf_stacks.values())
-            if layer_type == lte.CONV:
+            if layer_type in (lte.CONV, lte.DW_CONV):
                 unit_access[me.ITCN][de.FIL] = acclayer.total_filter_size() * \
                                                util.prod(regf_stacks.values())
             elif layer_type == lte.LOCAL:
                 unit_access[me.ITCN][de.FIL] = 0
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access[me.REGF] = [acclayer.total_ops() * util.prod(regf_stacks.values())] * de.NUM
             if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
@@ -1683,13 +1746,13 @@ class KaplaSolver:
             sz_gbuf = [0] * de.NUM
             sz_gbuf[de.IFM] = acclayer.total_ifmap_size() * util.prod(regf_stacks.values())
             sz_gbuf[de.OFM] = acclayer.total_ofmap_size() * util.prod(regf_stacks.values())
-            if layer_type == lte.CONV:
-                sz_gbuf[de.FIL] = acclayer.total_ifmap_size() * util.prod(regf_stacks.values())
+            if layer_type in (lte.CONV, lte.DW_CONV):
+                sz_gbuf[de.FIL] = acclayer.total_filter_size() * util.prod(regf_stacks.values())
             else:
                 sz_gbuf[de.FIL] = 0
 
             sz_regf = [0] * de.NUM
-            if layer_type == lte.CONV:
+            if layer_type in (lte.CONV, lte.DW_CONV):
                 sz_regf[de.FIL] = 1
                 sz_regf[de.IFM] = 1
                 sz_regf[de.OFM] = 1

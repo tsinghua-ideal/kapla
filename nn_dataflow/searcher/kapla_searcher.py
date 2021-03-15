@@ -10,35 +10,38 @@ import argparse
 from multiprocessing import Pool
 from collections import defaultdict, OrderedDict
 
-from nn_dataflow import util
 import nn_dataflow.core.loop_enum as le
 import nn_dataflow.core.data_category_enum as de
 import nn_dataflow.core.mem_hier_enum as me
-import nn_dataflow.core.parallel_enum as nndf_pe
-from nn_dataflow.core import InterLayerPipeline, PhyDim2, PartitionScheme, FmapRange, \
-    FmapPosition, DataLayout, partition, BufShrScheme, NestedLoopDesc, LoopBlockingScheme, \
-    SchedulingResult, NNDataflowScheme, Resource
-from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, ConvBackWeightLayer, \
-    LocalRegionBackLayer
-from nn_dataflow.nns import import_network
-from nn_dataflow.core.node_region import NodeRegion
 
-from nn_dataflow.solver.fast_explorer import gen_segment_set, segment_occp_is_valid
+from nn_dataflow import util
+from nn_dataflow.core import InterLayerPipeline, PhyDim2, FmapRange, FmapPosition, DataLayout, \
+    partition, BufShrScheme, NestedLoopDesc, LoopBlockingScheme, SchedulingResult, \
+    NNDataflowScheme, NodeRegion
+from nn_dataflow.core.layer import ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer
+from nn_dataflow.nns import import_network
+
+from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
+from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
+from nn_dataflow.array_mapping_templates.tensor_dim_map import SearchMethodEnum as sme
+
 from nn_dataflow.array_mapping_templates.row_stationary import RowStationary
 from nn_dataflow.array_mapping_templates.systolic import Systolic
-from nn_dataflow.array_mapping_templates.tensor_dim_map import RSTensorDimMap, ident_layer_type, \
-    get_conv_strds, SystolicTensorDimMap
-from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
-from nn_dataflow.array_mapping_templates.tensor_dim_map import ParallelEnum as pe
-from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
+from nn_dataflow.array_mapping_templates.tensor_dim_map import RSTensorDimMap, SystolicTensorDimMap
 from nn_dataflow.parser.kapla_cost_model import KaplaCostModel
 from nn_dataflow.parser.kapla_parse_utils import parse_options, parse_hardware, parse_json, \
-    shape_init_data_block, SegDfCache, SimpleCstr, BL, nn_rearrange, layer2workload, is_valid, \
-    get_min_factor, part_workload, construct_stack, layer_rearrange
+    shape_init_data_block, SimpleCstr, BL, nn_rearrange, SegDfCache, is_valid, part_workload, \
+    ident_layer_type, get_conv_strds, construct_stack, layer_rearrange
+from nn_dataflow.ml_related.ml_tuner import XGBTuner
 
 
 class KaplaSearcher:
-    def __init__(self, network, array_mapping, batch_size, resource, unit_cost, options, ntops=1):
+    """
+    Search for an optimal dataflow represented by the Kapla directives for a given
+    accelerator and a specified array mapping.
+    """
+    def __init__(self, search_method, network, array_mapping, batch_size, resource, unit_cost, options, ntops=1):
+        self.search_method = search_method
         self.network = network
         self.array_mapping = array_mapping
         self.batch_size = batch_size
@@ -50,6 +53,9 @@ class KaplaSearcher:
         self.ilp = InterLayerPipeline(network, batch_size, resource)
         self.segments = self.gen_segments()
         self.ordered_layer_list = self.ilp.ordered_layer_list()
+        if search_method == sme.ML_SEARCHER:
+            self.xgbtuner = XGBTuner(array_mapping, batch_size, unit_cost, options, plan_size=100,
+                                     num_threads=options.nprocesses, log_interval=50)
 
         if array_mapping == ame.ROW_STATIONARY:
             self.tdm = RSTensorDimMap()
@@ -73,69 +79,60 @@ class KaplaSearcher:
         seg_no_counter = 0
         for layer_name in self.ordered_layer_list:
             print("{}: {}".format(layer_counter, layer_name))
-            # if layer_counter != 7:
+            # if layer_counter != 3:
             #     layer_counter += 1
             #     continue
             seg_counter = 0
             nndf_list = []
             for seg in self.segments[layer_name]:
-                print("- {}: {}".format(seg_counter, seg.seg))
-                # if seg_counter != 3:
+                print("{}: {}".format(seg_counter, seg.seg))
+                # if seg_counter != 0:
                 #     seg_counter += 1
                 #     continue
                 allocation = seg.allocation()
                 seg_dfs = list()
 
                 # Get previous nndf.
-                curr_layer_idx = self.ordered_layer_list.index(seg[0][0])
-                if curr_layer_idx == 0:
+                cur_layer_idx = self.ordered_layer_list.index(seg[0][0])
+                if cur_layer_idx == 0:
                     prev_df = None
                     prev_nndf = nndf_tops[None]
                 else:
-                    prev_df = df_tops.get(self.ordered_layer_list[curr_layer_idx - 1], None)
-                    prev_nndf = nndf_tops.get(self.ordered_layer_list[curr_layer_idx - 1], None)
-
+                    prev_df = df_tops.get(self.ordered_layer_list[cur_layer_idx - 1], None)
+                    prev_nndf = nndf_tops.get(self.ordered_layer_list[cur_layer_idx - 1], None)
                 if prev_nndf is None:
                     continue
 
-                # Forwarding data regions. Map a spatial index to the forwarding region.
-                fwd_data_region_dict = {}
-                for sh_list in seg.ifm_fwd_dict.values():
-                    # A list of spatial indices that share the same ifmaps.
-                    r = allocation[sh_list[0].sp_idx][sh_list[0].tm_idx].proc_region
-                    for idx in sh_list[1:]:
-                        fwd_data_region_dict[idx] = r
-                for fwd_src, fwd_dst_list in seg.ofm_fwd_dict.items():
-                    # Ofmaps forwarded to neighbors.
-                    r = allocation[fwd_src.sp_idx][fwd_src.tm_idx].proc_region
-                    for idx in fwd_dst_list:
-                        fwd_data_region_dict[idx] = r
+                # Iterate through all valid constraints.
+                constraint_counter = 0
 
-                for constraint, _ in self.gen_constraint(seg):
+                constraint_prob = 0.04
+                constraint_handle = self.gen_constraint(seg)
+                if self.search_method == sme.RANDOM_SEARCHER:
+                    constraint_handle = util.random_collect(constraint_handle, constraint_prob)
+
+                for constraint, _ in constraint_handle:
                     print("-- constraint: {}".format(constraint))
+                    # if constraint_counter != 2:
+                    #     constraint_counter += 1
+                    #     continue
+                    constraint_counter += 1
                     cur_nndf = prev_nndf.copy()
                     seg_df, cost_dict, seg_time, cur_nndf, total_cost = \
                         self.search_segment_df(seg, allocation, constraint, cur_nndf)
                     if len(seg_df) == 0:
-                        print("Constraint iter: No valid seg nndf.")
                         continue
-                    print("** cur_nndf:")
-                    print(cur_nndf)
                     seg_dfs.append((seg_df, cost_dict, seg_time, cur_nndf, total_cost))
 
                 # Select best seg df.
                 if len(seg_dfs) == 0:
-                    print("Segment iter: No valid seg nndf.")
                     continue
                 top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
-                print("***Best seg_dfs: {}".format(top_seg_df))
-
                 nndf_result = nn_rearrange(top_seg_df, prev_df)
                 nndf_list.append(nndf_result)
                 seg_no_counter += 1
                 seg_counter += 1
             if len(nndf_list) == 0:
-                print("Last layer iter: No valid nndf.")
                 continue
             df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
             nndf_tops[layer_name] = df_tops[layer_name][3]
@@ -168,8 +165,6 @@ class KaplaSearcher:
         for sp_idx, (ltpl, rtpl, ctpl) in enumerate(zip(segment, allocation, constraint)):
             seg_times.append([])
             for tm_idx, (layer_name, resource, cstr) in enumerate(zip(ltpl, rtpl, ctpl)):
-                layer = self.network[layer_name]
-
                 # Update the constraint. Currently only support ofm update.
                 topbat = cstr.topbat
                 topifm = cstr.topifm
@@ -182,14 +177,27 @@ class KaplaSearcher:
                 fwd_data_region = fwd_data_region_dict.get((sp_idx, tm_idx))
                 if fwd_data_region is not None:
                     # Remap source data regions to the forwarding region.
-                    ifmap_layout = DataLayout(
-                        frngs=ifmap_layout.frngs,
-                        regions=(fwd_data_region,) * len(ifmap_layout.frngs),
-                        parts=tuple(p.projection(fwd_data_region, appl2frng=True)
-                                    for p in ifmap_layout.parts))
+                    ifmap_layout = DataLayout(frngs=ifmap_layout.frngs,
+                                              regions=(fwd_data_region,) * len(ifmap_layout.frngs),
+                                              parts=tuple(p.projection(fwd_data_region,
+                                                                       appl2frng=True)
+                                                          for p in ifmap_layout.parts))
+                # Search the layer's dataflow.
+                if self.search_method in {sme.KAPLA_SEARCHER, sme.RANDOM_SEARCHER}:
+                    df, cost_dict, layer_time, real_cstr, sched_vars = \
+                        self.search_layer_df(layer_name, cur_cstr, resource, ifmap_layout)
+                elif self.search_method == sme.ML_SEARCHER:
+                    result = self.xgbtuner.search(self.network[layer_name], self.batch_size,
+                                             self.array_mapping, self.unit_cost, cur_cstr, resource,
+                                             sp_idx, tm_idx, ifmap_layout, self.options,
+                                             n_trial=1024, n_parallel=128)
+                    if result is None:
+                        df, cost_dict, layer_time, real_cstr, sched_vars = (None for _ in range(5))
+                    else:
+                        df, cost_dict, layer_time, real_cstr, sched_vars = result
+                else:
+                    raise TypeError('Invalid search method: {}.'.format(self.search_method))
 
-                df, cost_dict, layer_time, real_cstr, sched_vars = \
-                    self.search_layer_df(layer_name, cur_cstr, resource, sp_idx, tm_idx, ifmap_layout)
                 if df is None:
                     return dict(), None, None, None, None
                 print("layer: {}".format(layer_name))
@@ -197,16 +205,16 @@ class KaplaSearcher:
                 print("cost: {}".format(cost_dict))
                 print("total cost: {}".format(sum(cost_dict.values())))
                 print("time: {}".format(layer_time))
-                print("sched_vars:")
+                print("sched vars:")
                 for idx, var in enumerate(sched_vars):
                     print(var)
-                print("---")
-                sched_vars = sched_vars[:-1]
+                print("")
+                # sched_vars = sched_vars[:-1]
+                sched_vars = sched_vars[:-9]
                 sched_result = self.derive_sched_result(layer_name, seg_idx, sp_idx, tm_idx,
-                                                        resource, ifmap_layout, sched_vars)
-                print("sched_result", sched_result)
+                                                        ifmap_layout, sched_vars)
+                print("sched result: {}".format(sched_result))
                 cur_nndf[layer_name] = sched_result
-
                 seg_df[layer_name]["dataflow"] = df
                 seg_df[layer_name]["sched_seq"] = [0, sp_idx, tm_idx]
                 for key, value in cost_dict.items():
@@ -216,12 +224,11 @@ class KaplaSearcher:
                 total_cost += sum(cost_dict.values())
 
         seg_time = self.cost_model.seg_time_estimation(self.network, segment, seg_times, cstr_collections)
-        print("* cur_nndf")
-        print(cur_nndf)
+
         return seg_df, seg_costs, seg_time, cur_nndf, total_cost
 
     @functools.lru_cache(maxsize=1024)
-    def search_layer_df(self, layer_name, cstr, resource, sp_idx, tm_idx, ifmap_layout):
+    def search_layer_df(self, layer_name, cstr, resource, ifmap_layout):
         min_cost = float("inf")
         min_cost_dict = dict()
         min_layer_time = float("inf")
@@ -254,8 +261,13 @@ class KaplaSearcher:
             apply_func = util.apply
             retrieve_func = retrieve_result_st
 
-        for part in partition.gen_partition(layer, self.batch_size, resource.proc_region.dim,
-                                            self.options, guaranteed=True):
+        partition_prob = 0.04
+        partition_handle = partition.gen_partition(layer, self.batch_size, resource.proc_region.dim,
+                                                   self.options, guaranteed=True)
+        if self.search_method == sme.RANDOM_SEARCHER:
+            partition_handle = util.random_collect(partition_handle, partition_prob)
+
+        for part in partition_handle:
             parted_workload = part_workload(self.array_mapping, part, layer, self.batch_size)
             if self.options.hw_gbuf_sharing:
                 buf_sharing = BufShrScheme(resource.proc_region, part, layer.data_loops())
@@ -265,24 +277,23 @@ class KaplaSearcher:
             # Filter nodes. All memory nodes can store filters. Deduplicate.
             filter_nodes = frozenset(resource.dram_region.iter_node())
             # Ofmap layout.
-            ofmap_range = FmapRange(
-                FmapPosition(b=0, n=0, h=0, w=0),
-                FmapPosition(b=self.batch_size, n=layer.nofm,
-                             h=layer.hofm, w=layer.wofm))
+            ofmap_range = FmapRange(FmapPosition(b=0, n=0, h=0, w=0),
+                                    FmapPosition(b=self.batch_size, n=layer.nofm, h=layer.hofm,
+                                                 w=layer.wofm))
             ofmap_data_region = resource.dst_data_region
-            ofmap_layout = DataLayout(
-                frngs=(ofmap_range,),
-                regions=(ofmap_data_region,),
-                parts=(part.projection(ofmap_data_region, appl2frng=True),))
+            ofmap_layout = DataLayout(frngs=(ofmap_range,), regions=(ofmap_data_region,),
+                                      parts=(part.projection(ofmap_data_region, appl2frng=True),))
             # Partition NoC hop cost.
-            unit_nhops = partition.unit_nhops_to_proc_region(
-                layer, self.batch_size, resource.proc_region, part,
-                filter_nodes, ifmap_layout, ofmap_layout, self.options)
+            unit_nhops = \
+                partition.unit_nhops_to_proc_region(layer, self.batch_size, resource.proc_region,
+                                                    part, filter_nodes, ifmap_layout, ofmap_layout,
+                                                    self.options)
 
-            r = apply_func(_search_layer_df_perprocess, (layer_type, conv_strds,
-                                                         frozenset(parted_workload.items()), part, buf_sharing,
-                                                         resource, cstr, self.array_mapping, unit_nhops, self.unit_cost,
-                                                         self.options))
+            r = apply_func(_search_layer_df_perprocess,
+                           (self.search_method, layer_type, conv_strds,
+                            frozenset(parted_workload.items()), part,
+                            buf_sharing, resource, cstr, self.array_mapping, unit_nhops,
+                            self.unit_cost, self.options))
             results.append(r)
 
         for (layer_df, cost_dict, layer_time, real_cstr, layer_vars) in retrieve_func():
@@ -302,133 +313,6 @@ class KaplaSearcher:
 
         return min_layer_df, min_cost_dict, min_layer_time, min_cstr, min_layer_vars
 
-    def cstr_check_prune(self, layer_type, constraint, loopcnt, bl_ords, resource):
-        is_valid = True
-        remain_lcnt = dict()
-
-        if loopcnt["N"] < constraint.topbat:
-            is_valid = False
-        if loopcnt["C"] < constraint.topifm:
-            is_valid = False
-        if loopcnt["K"] < constraint.topofm:
-            is_valid = False
-
-        top_bl_ts = [0 for _ in range(le.NUM)]
-        top_bl_ts[le.BAT] = constraint.topbat
-        # topifm and topofm cannot be trigger together.
-        top_bl_ts[le.IFM] = constraint.topifm
-        top_bl_ts[le.OFM] = constraint.topofm
-
-        # Pipeline constraint check.
-        outermost = le.NUM - 1
-        # Require BAT always at the top to eliminate redundant order when topbat is 1.
-        if constraint.topbat > 1 and (constraint.topifm > 1 or constraint.topofm > 1) and \
-                bl_ords[BL.GBUF].index(outermost) != le.BAT:
-            is_valid = False
-        outermost -= 1
-        if constraint.topifm > 1 and bl_ords[BL.GBUF].index(outermost) != le.IFM:
-            is_valid = False
-        if constraint.topofm > 1 and bl_ords[BL.GBUF].index(outermost) != le.OFM:
-            is_valid = False
-
-        # If data regions are not DRAM, can only access once, no spilling.
-        src_is_dram = (resource.src_data_region.type == NodeRegion.DRAM)
-        dst_is_dram = (resource.dst_data_region.type == NodeRegion.DRAM)
-        if not src_is_dram and bl_ords[BL.GBUF][le.IFM] < bl_ords[BL.GBUF][le.OFM]:
-            if top_bl_ts[le.OFM] > 1:
-                is_valid = False
-            else:
-                top_bl_ts[le.OFM] = 1
-        if not dst_is_dram and bl_ords[BL.GBUF][le.OFM] < bl_ords[BL.GBUF][le.IFM]:
-            if top_bl_ts[le.IFM] > 1:
-                is_valid = False
-            else:
-                top_bl_ts[le.IFM] = 1
-
-        if top_bl_ts[le.BAT]:
-            remain_lcnt["N"] = util.idivc(loopcnt["N"], top_bl_ts[le.BAT])
-        else:
-            remain_lcnt["N"] = loopcnt["N"]
-        if top_bl_ts[le.IFM]:
-            remain_lcnt["C"] = util.idivc(loopcnt["C"], top_bl_ts[le.IFM])
-        else:
-            remain_lcnt["C"] = loopcnt["C"]
-        if top_bl_ts[le.OFM]:
-            remain_lcnt["K"] = util.idivc(loopcnt["K"], top_bl_ts[le.OFM])
-        else:
-            remain_lcnt["K"] = loopcnt["K"]
-
-        if self.array_mapping == ame.ROW_STATIONARY:
-            if layer_type in (lte.CONV, lte.LOCAL):
-                remain_lcnt["Xo"] = loopcnt["Xo"]
-                remain_lcnt["Yo"] = loopcnt["Yo"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
-                remain_lcnt["Xi"] = loopcnt["Xi"]
-                remain_lcnt["Yi"] = loopcnt["Yi"]
-        elif self.array_mapping == ame.SYSTOLIC:
-            remain_lcnt["XY"] = loopcnt["XY"]
-
-        return is_valid, top_bl_ts, remain_lcnt
-
-    def gbuf_tensor_mul(self, layer_type, gbuf_unit_tensor, regf_tensor_repl_dict,
-                        regf_stack_repl_dict):
-        for dim, r in regf_tensor_repl_dict.items():
-            if (layer_type == lte.LOCAL and dim == "K") or \
-                    (layer_type == lte.LOCAL_BACK_H and dim == "C"):
-                gbuf_unit_tensor["C"] *= r
-                gbuf_unit_tensor["K"] *= r
-            elif self.array_mapping == ame.ROW_STATIONARY and \
-                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
-                gbuf_unit_tensor["Yo"] *= r
-                gbuf_unit_tensor["Yi"] *= r
-            elif self.array_mapping == ame.ROW_STATIONARY and \
-                    ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or
-                     (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
-                gbuf_unit_tensor["Xo"] *= r
-                gbuf_unit_tensor["Xi"] *= r
-            else:
-                gbuf_unit_tensor[dim] *= r
-
-        for reg_stack_dict in regf_stack_repl_dict:
-            for dim, r in reg_stack_dict.items():
-                if (layer_type == lte.LOCAL and dim == "K") or \
-                        (layer_type == lte.LOCAL_BACK_H and dim == "C"):
-                    gbuf_unit_tensor["C"] *= r
-                    gbuf_unit_tensor["K"] *= r
-                elif self.array_mapping == ame.ROW_STATIONARY and \
-                        ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Yo") or
-                         (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Yi")):
-                    gbuf_unit_tensor["Yo"] *= r
-                    gbuf_unit_tensor["Yi"] *= r
-                elif self.array_mapping == ame.ROW_STATIONARY and \
-                        ((layer_type in (lte.CONV, lte.LOCAL) and dim == "Xo") or
-                         (layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H) and dim == "Xi")):
-                    gbuf_unit_tensor["Xo"] *= r
-                    gbuf_unit_tensor["Xi"] *= r
-                else:
-                    gbuf_unit_tensor[dim] *= r
-
-        return gbuf_unit_tensor
-
-    def get_gbuf_iter(self, layer_type, top_bl_ts, remain_lcnt):
-        gbuf_iter_dict = dict()
-        if self.array_mapping == ame.ROW_STATIONARY:
-            gbuf_iter_dict["N"] = top_bl_ts[le.BAT]
-            gbuf_iter_dict["C"] = top_bl_ts[le.IFM]
-            gbuf_iter_dict["K"] = top_bl_ts[le.OFM]
-            if layer_type in (lte.CONV, lte.LOCAL):
-                gbuf_iter_dict["Yo"] = remain_lcnt["Yo"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
-                gbuf_iter_dict["Yi"] = remain_lcnt["Yi"]
-        elif self.array_mapping == ame.SYSTOLIC:
-            gbuf_iter_dict["N"] = top_bl_ts[le.BAT]
-            gbuf_iter_dict["C"] = top_bl_ts[le.IFM]
-            gbuf_iter_dict["K"] = top_bl_ts[le.OFM]
-            gbuf_iter_dict["XY"] = remain_lcnt["XY"]
-
-        return gbuf_iter_dict
-
     def gen_segments(self):
         segments = defaultdict(list)
         for seg in self.ilp.gen_segment(self.options):
@@ -441,110 +325,30 @@ class KaplaSearcher:
         for constraint, hints in segment.gen_constraint():
             yield constraint, hints
 
-    def solve_array_mapping(self, layer_type, layer, conv_strds, resource):
-        # Construct the full layer workload.
-        workload = layer2workload(self.array_mapping, layer, self.batch_size)
-
-        # Get the array mapping unit blocks.
-        if self.array_mapping == ame.ROW_STATIONARY:
-            mapping = RowStationary(layer_type, workload, resource, conv_strds)
-        elif self.array_mapping == ame.SYSTOLIC:
-            mapping = Systolic(layer_type, workload, resource, conv_strds)
-        else:
-            raise ValueError("Not yet implement {}".format(self.array_mapping))
-
-        loopcnt, regf_repls, regf_unit_tensor, gbuf_unit_tensor, base_stacks, base_updates, \
-            origin_stack_step_dict, unit_ops = mapping.get_unit_block()
-
-        return loopcnt, regf_repls, regf_unit_tensor, gbuf_unit_tensor, base_stacks, base_updates, \
-               origin_stack_step_dict, unit_ops, mapping
-
-    def tensor_div(self, layer_type, conv_strds, tensor, dim, factor):
-        if (layer_type == lte.LOCAL and dim == "K") or \
-                (layer_type == lte.LOCAL_BACK_H and dim == "C"):
-            tensor["C"] /= factor
-            tensor["K"] /= factor
-        else:
-            tensor[dim] /= factor
-
-        if self.array_mapping == ame.ROW_STATIONARY:
-            # Recalculate ifm/ofm.
-            if layer_type in (lte.CONV, lte.LOCAL):
-                tensor["Xi"] = (tensor["Xo"] - 1) * conv_strds[0] + tensor["R"]
-                tensor["Yi"] = (tensor["Yo"] - 1) * conv_strds[1] + tensor["S"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
-                tensor["Xo"] = (tensor["Xi"] - 1) * conv_strds[0] + tensor["R"]
-                tensor["Yo"] = (tensor["Yi"] - 1) * conv_strds[1] + tensor["S"]
-
-        return tensor
-
-    def tensor_mul(self, layer_type, conv_strds, tensor, dim, factor):
-        if (layer_type == lte.LOCAL and dim == "K") or \
-                (layer_type == lte.LOCAL_BACK_H and dim == "C"):
-            tensor["C"] *= factor
-            tensor["K"] *= factor
-        else:
-            tensor[dim] *= factor
-
-        if self.array_mapping == ame.ROW_STATIONARY:
-            # Recalculate ifm/ofm.
-            if layer_type in (lte.CONV, lte.LOCAL):
-                tensor["Xi"] = (tensor["Xo"] - 1) * conv_strds[0] + tensor["R"]
-                tensor["Yi"] = (tensor["Yo"] - 1) * conv_strds[1] + tensor["S"]
-            elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
-                tensor["Xo"] = (tensor["Xi"] - 1) * conv_strds[0] + tensor["R"]
-                tensor["Yo"] = (tensor["Yi"] - 1) * conv_strds[1] + tensor["S"]
-
-        return tensor
-
-    def finalize_layer_df(self, regf_unit_tensor, regf_updates, regf_stacks, gbuf_unit_tensor,
-                          gbuf_updates, gbuf_stacks):
-        layer_df = dict()
-        gbuf_df = dict()
-        gbuf_df['tensor_w'] = {dim: gbuf_unit_tensor[dim] for dim in self.tdm.data_list[de.FIL]}
-        gbuf_df['tensor_i'] = {dim: gbuf_unit_tensor[dim] for dim in self.tdm.data_list[de.IFM]}
-        gbuf_df['tensor_o'] = {dim: gbuf_unit_tensor[dim] for dim in self.tdm.data_list[de.OFM]}
-        gbuf_df['stack'] = gbuf_stacks
-        gbuf_df['update'] = gbuf_updates
-
-        regf_df = dict()
-        regf_df['tensor_w'] = {dim: regf_unit_tensor[dim] for dim in self.tdm.data_list[de.FIL]}
-        regf_df['tensor_i'] = {dim: regf_unit_tensor[dim] for dim in self.tdm.data_list[de.IFM]}
-        regf_df['tensor_o'] = {dim: regf_unit_tensor[dim] for dim in self.tdm.data_list[de.OFM]}
-        regf_df['stack'] = regf_stacks
-        regf_df['update'] = regf_updates
-
-        layer_df['GBUF'] = gbuf_df
-        layer_df['REGF'] = regf_df
-
-        return layer_df
-
-    def derive_sched_result(self, layer_name, seg_idx, sp_idx, tm_idx, resource, ifmap_layout, sched_vars):
-        (layer_type, logic_region, mapping_fold, mapping_repls, part, conv_strds, loopcnt, unit_size, knobs_tuple,
-         bl_ts, bl_ords, unit_ops, resource, bufshr) = sched_vars
+    def derive_sched_result(self, layer_name, seg_idx, sp_idx, tm_idx, ifmap_layout, sched_vars):
+        (layer_type, logic_region, mapping_fold, mapping_repls, part, conv_strds, loopcnt,
+         unit_size, knobs_tuple, bl_ts, bl_ords, unit_ops, resource, bufshr) = sched_vars
 
         layer = self.network[layer_name]
 
         proc_region = resource.proc_region
 
         # Ofmap layout.
-        ofmap_range = FmapRange(
-            FmapPosition(b=0, n=0, h=0, w=0),
-            FmapPosition(b=self.batch_size, n=layer.nofm,
-                         h=layer.hofm, w=layer.wofm))
+        ofmap_range = FmapRange(FmapPosition(b=0, n=0, h=0, w=0),
+                                FmapPosition(b=self.batch_size, n=layer.nofm, h=layer.hofm,
+                                             w=layer.wofm))
         ofmap_data_region = resource.dst_data_region
-        ofmap_layout = DataLayout(
-            frngs=(ofmap_range,),
-            regions=(ofmap_data_region,),
-            parts=(part.projection(ofmap_data_region, appl2frng=True),))
+        ofmap_layout = DataLayout(frngs=(ofmap_range,), regions=(ofmap_data_region,),
+                                  parts=(part.projection(ofmap_data_region, appl2frng=True),))
 
         filter_nodes = frozenset(resource.dram_region.iter_node())
         unit_nhops = partition.unit_nhops_to_proc_region(layer, self.batch_size, proc_region,
-                                                         part, filter_nodes, ifmap_layout, ofmap_layout, self.options)
+                                                         part, filter_nodes, ifmap_layout,
+                                                         ofmap_layout, self.options)
 
-        lbs = self.derive_nndf_lbs(layer_type, layer, logic_region, mapping_fold, mapping_repls, part, conv_strds,
-                                   loopcnt, unit_size, knobs_tuple,
-                                   bl_ts, bl_ords, unit_ops, resource, bufshr)
+        lbs = self.derive_nndf_lbs(layer_type, layer, logic_region, mapping_fold, mapping_repls,
+                                   part, conv_strds, loopcnt, unit_size, knobs_tuple, bl_ts,
+                                   bl_ords, resource, bufshr)
 
         sched_seq = (seg_idx, sp_idx, tm_idx)
 
@@ -552,127 +356,131 @@ class KaplaSearcher:
 
         return sched_result
 
-    def derive_nndf_partition(self, layer_type, gbuf_stack_repl_dict, gbuf_stacks):
-        porders = [None for _ in range(nndf_pe.NUM)]
-
-        ord_counter = 0
-        for stc in gbuf_stacks:
-            for i in range(0, len(stc[:-1]), 2):
-                dim = stc[i]
-                penum = self.tdm.get_dim_rlvt_part_type(layer_type, dim)
-                if penum is not None and porders[penum] is None:
-                    porders[penum] = ord_counter
-                    ord_counter += 1
-                    break
-
-        for idx in range(nndf_pe.NUM):
-            if porders[idx] is None:
-                porders[idx] = ord_counter
-                ord_counter += 1
-
-        porders = tuple(porders)
-
-        pdims = [[1, 1] for _ in range(nndf_pe.NUM)]
-        for drc, gbuf_repl in enumerate(gbuf_stack_repl_dict):
-            for dim, r in gbuf_repl.items():
-                penum = self.tdm.get_dim_rlvt_part_type(layer_type, dim)
-                pdims[penum][drc] *= r
-
-        for idx in range(nndf_pe.NUM):
-            pdims[idx] = PhyDim2(pdims[idx][1], pdims[idx][0])
-
-        pdims = tuple(pdims)
-        return PartitionScheme(porders, pdims)
-
-    def derive_nndf_lbs(self, layer_type, layer, logic_region, mapping_fold, mapping_repls, part, conv_strds, loopcnt,
-                        unit_size, knobs_tuple,
-                        bl_ts, bl_ords, unit_ops, resource, bufshr):
+    def derive_nndf_lbs(self, layer_type, layer, logic_region, mapping_fold, mapping_repls, part,
+                        conv_strds, loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords, resource,
+                        bufshr):
         for bl in range(BL.NUM):
             unit_size[bl] = self.tdm.format_tensor_dim(layer_type, unit_size[bl], conv_strds)
 
         if self.array_mapping == ame.ROW_STATIONARY:
             part_layer = part_workload(self.array_mapping, part, layer, self.batch_size)
             if layer_type == lte.CONV:
-                acclayer = ConvLayer(
-                    1, 1,
-                    (util.idivc(part_layer["Yo"], mapping_fold.w), part_layer["Xo"]),
-                    (part_layer["S"], part_layer["R"]),
-                    strd=(conv_strds[1], conv_strds[0]))
+                acclayer = ConvLayer(1, 1, (util.idivc(part_layer["Yo"], mapping_fold.w),
+                                            part_layer["Xo"]),
+                                     (part_layer["S"], part_layer["R"]),
+                                     strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yi"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
                                       w=util.idivc(part_layer["Yo"], mapping_fold.w))
             elif layer_type == lte.LOCAL:
-                acclayer = LocalRegionLayer(
-                    1,
-                    (util.idivc(part_layer["Yo"], mapping_fold.w), part_layer["Xo"]),
-                    conv_strds[2], (part_layer["S"], part_layer["R"]),
-                    ntrd=conv_strds[2],
-                    strd=(conv_strds[1], conv_strds[0]))
+                acclayer = LocalRegionLayer(1, (util.idivc(part_layer["Yo"], mapping_fold.w),
+                                                part_layer["Xo"]), conv_strds[2],
+                                            (part_layer["S"], part_layer["R"]),
+                                            ntrd=conv_strds[2], strd=(conv_strds[1], conv_strds[0]))
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yi"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
                                       w=util.idivc(part_layer["Yo"], mapping_fold.w))
             elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
-                acclayer = ConvLayer(
-                    1, 1,
-                    (util.idivc(part_layer["Yi"], mapping_fold.w), part_layer["Xi"]),
-                    (part_layer["S"], part_layer["R"]),
-                    strd=(conv_strds[1], conv_strds[0]), rw_data=layer.rw_data)
+                acclayer = ConvLayer(1, 1, (util.idivc(part_layer["Yi"], mapping_fold.w),
+                                            part_layer["Xi"]),
+                                     (part_layer["S"], part_layer["R"]),
+                                     strd=(conv_strds[1], conv_strds[0]), rw_data=layer.rw_data)
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yo"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
                                       w=util.idivc(part_layer["Yi"], mapping_fold.w))
             elif layer_type == lte.LOCAL_BACK_H:
-                acclayer = LocalRegionLayer(
-                    1,
+                acclayer = LocalRegionLayer(1, (util.idivc(part_layer["Yi"], mapping_fold.w),
+                                                part_layer["Xi"]), conv_strds[2],
+                                            (part_layer["S"], part_layer["R"]),
+                                            strd=(conv_strds[1], conv_strds[0]), ntrd=conv_strds[2],
+                                            rw_data=layer.rw_data)
+                amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yo"]
+                dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
+                                      w=util.idivc(part_layer["Yi"], mapping_fold.w))
+            elif layer_type == lte.DW_CONV:
+                acclayer = DepthwiseConvolutionLayer(1,
+                    (util.idivc(part_layer["Yo"], mapping_fold.w), part_layer["Xo"]),
+                    (part_layer["S"], part_layer["R"]),
+                    (conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yi"]
+                dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
+                                      w=util.idivc(part_layer["Yo"], mapping_fold.w))
+            elif layer_type in (lte.DW_CONV_H, lte.DW_CONV_W):
+                acclayer = DepthwiseConvolutionLayer(1,
                     (util.idivc(part_layer["Yi"], mapping_fold.w), part_layer["Xi"]),
-                    conv_strds[2], (part_layer["S"], part_layer["R"]),
-                    strd=(conv_strds[1], conv_strds[0]),
-                    ntrd=conv_strds[2],
+                    (part_layer["S"], part_layer["R"]), strd=(conv_strds[1], conv_strds[0]),
                     rw_data=layer.rw_data)
                 amp_acc_ifm = 1. * acclayer.hifm * mapping_fold.w / part_layer["Yo"]
                 dim_flpeset = PhyDim2(h=util.idivc(part_layer["S"], mapping_fold.h),
                                       w=util.idivc(part_layer["Yi"], mapping_fold.w))
-            # print(acclayer)
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
             flpesets_per_unitpass = mapping_fold.h
             unit_access = [[float('nan')] * de.NUM for _ in range(me.NUM)]
             regf_reusable = [False for _ in range(de.NUM)]
 
             if layer_type == lte.CONV:
-                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["K"] * mapping_repls["N"]
-                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"] * mapping_repls["K"]
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * mapping_repls[
-                    "N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"] * \
+                                               mapping_repls["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
             elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W):
-                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["C"] * mapping_repls["N"]
-                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"] * mapping_repls["K"]
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["K"] * mapping_repls[
-                    "N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"] * \
+                                               mapping_repls["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
             elif layer_type == lte.LOCAL:
-                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["K"] * mapping_repls["N"]
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"]
                 unit_access[me.DRAM][de.FIL] = 0
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["K"] * mapping_repls[
-                    "N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
             elif layer_type == lte.LOCAL_BACK_H:
-                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["C"] * mapping_repls["N"]
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"]
                 unit_access[me.DRAM][de.FIL] = 0
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * mapping_repls[
-                    "N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
+            elif layer_type == lte.DW_CONV:
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["K"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["K"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
+            elif layer_type in (lte.DW_CONV_H, lte.DW_CONV_W):
+                unit_access[me.DRAM][de.OFM] = acclayer.total_ofmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"]
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"]
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access[me.GBUF][de.FIL] = unit_access[me.DRAM][de.FIL]
             unit_access[me.GBUF][de.IFM] = unit_access[me.DRAM][de.IFM] * flpesets_per_unitpass
             unit_access[me.GBUF][de.OFM] = unit_access[me.DRAM][de.OFM] * flpesets_per_unitpass
 
-            unit_access[me.ITCN][de.IFM] = acclayer.wifm * dim_flpeset.size() \
-                                           * flpesets_per_unitpass * util.prod(mapping_repls.values())
-            unit_access[me.ITCN][de.OFM] = acclayer.wofm * dim_flpeset.size() \
-                                           * flpesets_per_unitpass * util.prod(mapping_repls.values())
+            unit_access[me.ITCN][de.IFM] = acclayer.wifm * dim_flpeset.size() * \
+                                           flpesets_per_unitpass * util.prod(mapping_repls.values())
+            unit_access[me.ITCN][de.OFM] = acclayer.wofm * dim_flpeset.size() * \
+                                           flpesets_per_unitpass * util.prod(mapping_repls.values())
 
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
-                unit_access[me.ITCN][de.FIL] = acclayer.wfil * dim_flpeset.size() \
-                                               * flpesets_per_unitpass * util.prod(mapping_repls.values())
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
+                unit_access[me.ITCN][de.FIL] = acclayer.wfil * dim_flpeset.size() * \
+                                               flpesets_per_unitpass * \
+                                               util.prod(mapping_repls.values())
             elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
                 unit_access[me.ITCN][de.FIL] = 0
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
-            unit_access[me.REGF] = [acclayer.total_ops() * util.prod(mapping_repls.values())] * de.NUM
+            unit_access[me.REGF] = \
+                [acclayer.total_ops() * util.prod(mapping_repls.values())] * de.NUM
             if layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
                 unit_access[me.REGF][de.FIL] = 0
 
@@ -680,13 +488,14 @@ class KaplaSearcher:
             sz_gbuf[de.IFM] /= mapping_fold.w
             sz_gbuf[de.OFM] /= mapping_fold.w
 
-            if layer_type in (lte.CONV, lte.LOCAL):
+            if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
                 sz_gbuf[de.IFM] /= amp_acc_ifm
             else:
                 sz_gbuf[de.OFM] /= amp_acc_ifm
 
             sz_regf = [0] * de.NUM
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 sz_regf[de.FIL] = acclayer.wfil
                 sz_regf[de.IFM] = acclayer.wfil
                 sz_regf[de.OFM] = 1
@@ -696,28 +505,28 @@ class KaplaSearcher:
                 sz_regf[de.OFM] = 1
 
             ops_lpe = acclayer.total_ops() * util.prod(mapping_repls.values())
-            loopcnt = (loopcnt["C"], loopcnt["K"], loopcnt["N"] * mapping_fold.w)
-            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W):
+            loopcnt = [loopcnt["C"], loopcnt["K"], loopcnt["N"] * mapping_fold.w]
+            if layer_type in (lte.CONV, lte.CONV_BACK_H, lte.CONV_BACK_W, lte.DW_CONV,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 unit_time = acclayer.wfil * acclayer.hfil
                 regf_reusable[de.IFM] = (acclayer.wfil == acclayer.wifm)
             elif layer_type in (lte.LOCAL, lte.LOCAL_BACK_H):
                 unit_time = acclayer.nreg * acclayer.wreg * acclayer.hreg
                 regf_reusable[de.IFM] = (acclayer.wreg == acclayer.wifm)
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
             regf_reusable[de.OFM] = (acclayer.wofm == 1)
             regf_reusable[de.FIL] = (mapping_fold.h == 1)
 
             if layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H):
                 sz_regf[de.IFM], sz_regf[de.OFM] = sz_regf[de.OFM], sz_regf[de.IFM]
-                regf_reusable[de.IFM], regf_reusable[de.OFM] = regf_reusable[de.OFM], regf_reusable[de.IFM]
+                regf_reusable[de.IFM], regf_reusable[de.OFM] = \
+                    regf_reusable[de.OFM], regf_reusable[de.IFM]
                 for i in range(me.NUM):
-                    unit_access[i][de.IFM], unit_access[i][de.OFM] = unit_access[i][de.OFM], unit_access[i][de.IFM]
+                    unit_access[i][de.IFM], unit_access[i][de.OFM] = \
+                        unit_access[i][de.OFM], unit_access[i][de.IFM]
 
-            sz_gbuf = tuple(sz_gbuf)
-            sz_regf = tuple(sz_regf)
-            for i in range(me.NUM):
-                unit_access[i] = tuple(unit_access[i])
-            unit_access = tuple(unit_access)
-            regf_reusable = tuple(regf_reusable)
+
 
             comp_bl_ts = [[1 for _ in range(3)] for _ in range(BL.NUM + 1)]
             comp_bl_ords = [[1 for _ in range(3)] for _ in range(BL.NUM)]
@@ -741,6 +550,27 @@ class KaplaSearcher:
                     comp_bl_ords[bl][d_idx] = counter
                 counter += 1
 
+            for bl in range(BL.NUM):
+                for order, didx in enumerate(sorted(range(len(comp_bl_ords[bl])),
+                        key=lambda k: comp_bl_ords[bl][k])):
+                    comp_bl_ords[bl][didx] = order
+
+            # For back-prop localregion layer, since the data_loop mapping is using the conventional
+            # forward version local-region layer, we need to reverse the i and o dimension.
+            if layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
+                for ble in range(BL.NUM+1):
+                    comp_bl_ts[ble][le.IFM], comp_bl_ts[ble][le.OFM] = \
+                        comp_bl_ts[ble][le.OFM], comp_bl_ts[ble][le.IFM]
+                for ble in range(me.NUM):
+                    unit_access[ble][de.IFM], unit_access[ble][de.OFM] = \
+                        unit_access[ble][de.OFM], unit_access[ble][de.IFM]
+                for ble in range(BL.NUM):
+                    comp_bl_ords[ble][le.IFM], comp_bl_ords[ble][le.OFM] = \
+                        comp_bl_ords[ble][le.OFM], comp_bl_ords[ble][le.IFM]
+                loopcnt[le.IFM], loopcnt[le.OFM] = loopcnt[le.OFM], loopcnt[le.IFM]
+
+            loopcnt = tuple(loopcnt)
+
             for i in range(BL.NUM):
                 comp_bl_ords[i] = tuple(comp_bl_ords[i])
             comp_bl_ords = tuple(comp_bl_ords)
@@ -748,15 +578,26 @@ class KaplaSearcher:
                 comp_bl_ts[i] = tuple(comp_bl_ts[i])
             comp_bl_ts = tuple(comp_bl_ts)
 
-            nld = NestedLoopDesc(loopcnt=loopcnt, unit_access=unit_access,
-                                 usize_gbuf=sz_gbuf, usize_regf=sz_regf,
-                                 unit_ops=ops_lpe, unit_time=unit_time, data_loops=acclayer.data_loops(),
-                                 regf_reusable=regf_reusable, rw_data=layer.rw_data)
+            sz_gbuf = tuple(sz_gbuf)
+            sz_regf = tuple(sz_regf)
+            for i in range(me.NUM):
+                unit_access[i] = tuple(unit_access[i])
+            unit_access = tuple(unit_access)
+            regf_reusable = tuple(regf_reusable)
+
+            nld = NestedLoopDesc(loopcnt=loopcnt, unit_access=unit_access, usize_gbuf=sz_gbuf,
+                                 usize_regf=sz_regf, unit_ops=ops_lpe, unit_time=unit_time,
+                                 data_loops=acclayer.data_loops(), regf_reusable=regf_reusable,
+                                 rw_data=layer.rw_data)
 
             real_resource = resource._replace(size_gbuf=resource.size_gbuf / 0.99,
                                               size_regf=resource.size_regf / 0.99)
 
-            lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr, self.options)
+            print('###DEBUG###')
+            print('comp_bl_ts: {}'.format(comp_bl_ts))
+            print('comp_bl_ords: {}'.format(comp_bl_ords))
+            lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr,
+                                     self.options)
             if not lbs.is_valid():
                 print("LBS INVALID!")
                 print("loopcnt", loopcnt)
@@ -772,35 +613,37 @@ class KaplaSearcher:
                 print("bl_ords", bl_ords)
                 print("comp_bl_ords", comp_bl_ords)
                 print("bufshr", tuple(bufshr.size(dce) for dce in range(de.NUM)))
+
         elif self.array_mapping == ame.SYSTOLIC:
             part_layer, p_batch_size, p_occ = bufshr.part.part_layer(layer, self.batch_size)
             fold_h, fold_w = mapping_fold.h, mapping_fold.w
-            # fold_hofm = util.closest_factor(mapping_fold.h, factor=mapping_fold.h/2)[0]
-            # fold_wofm = mapping_fold.h / fold_hofm
             full_xy = layer.hofm * layer.wofm
             fold_xy = util.idivc(full_xy, mapping_fold.h)
             fold_x = util.closest_factor(fold_xy, factor=math.sqrt(fold_xy))[0]
             fold_y = fold_xy / fold_x
             if layer_type == lte.CONV:
-                acclayer = ConvLayer(
-                    1, 1. * part_layer.nofm / fold_w,
-                    (fold_x, fold_y),
-                    (part_layer.hfil, part_layer.wfil),
-                    strd=(conv_strds[1], conv_strds[0]))
-                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
-                              part_layer.hifm / part_layer.wifm
-                dim_flpeset = PhyDim2(h=logic_region.h, w=logic_region.w)
+                acclayer = ConvLayer(1, 1. * part_layer.nofm / fold_w, (fold_x, fold_y),
+                                     (part_layer.hfil, part_layer.wfil),
+                                     strd=(conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / part_layer.hifm / \
+                              part_layer.wifm
                 unit_time = layer.wfil * layer.hfil
             elif layer_type == lte.LOCAL:
-                acclayer = LocalRegionLayer(
-                    1. * layer.nofm / fold_w,
-                    (fold_x, fold_y),
-                    layer.nreg, (layer.hreg, layer.wreg),
-                    strd=(conv_strds[1], conv_strds[0]))
-                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
-                              part_layer.hifm / part_layer.wifm
-                dim_flpeset = PhyDim2(h=logic_region.h, w=logic_region.w)
+                acclayer = LocalRegionLayer(1. * layer.nofm / fold_w, (fold_x, fold_y),
+                                            layer.nreg, (layer.hreg, layer.wreg),
+                                            strd=(conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / part_layer.hifm / \
+                              part_layer.wifm
                 unit_time = layer.nreg * layer.wreg * layer.hreg
+            elif layer_type == lte.DW_CONV:
+                acclayer = DepthwiseConvolutionLayer(1. * layer.nofm / fold_w, (fold_x, fold_y),
+                                                     (layer.hfil, layer.wfil),
+                                                     strd=(conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / part_layer.hifm / \
+                              part_layer.wifm
+                unit_time = layer.wfil * layer.hfil
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access = [[float('nan')] * de.NUM for _ in range(me.NUM)]
             regf_reusable = [False for _ in range(de.NUM)]
@@ -809,35 +652,49 @@ class KaplaSearcher:
 
             if layer_type == lte.CONV:
                 unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size() * mapping_repls["C"]
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * mapping_repls[
-                    "N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["C"] * \
+                                               mapping_repls["N"] / amp_acc_ifm
             elif layer_type == lte.LOCAL:
                 unit_access[me.DRAM][de.FIL] = 0
-                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["N"] / amp_acc_ifm
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["N"] / \
+                                               amp_acc_ifm
+            elif layer_type == lte.DW_CONV:
+                unit_access[me.DRAM][de.FIL] = acclayer.total_filter_size()
+                unit_access[me.DRAM][de.IFM] = acclayer.total_ifmap_size() * mapping_repls["N"] / \
+                                               amp_acc_ifm
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
             unit_access[me.GBUF][de.FIL] = unit_access[me.DRAM][de.FIL]
             unit_access[me.GBUF][de.IFM] = unit_access[me.DRAM][de.IFM]
             unit_access[me.GBUF][de.OFM] = unit_access[me.DRAM][de.OFM]
 
-            unit_access[me.ITCN][de.IFM] = acclayer.total_ifmap_size() * util.prod(mapping_repls.values())
-            unit_access[me.ITCN][de.OFM] = acclayer.total_ofmap_size() * util.prod(mapping_repls.values())
-            if layer_type == lte.CONV:
-                unit_access[me.ITCN][de.FIL] = acclayer.total_filter_size() * util.prod(mapping_repls.values())
+            unit_access[me.ITCN][de.IFM] = acclayer.total_ifmap_size() * \
+                                           util.prod(mapping_repls.values())
+            unit_access[me.ITCN][de.OFM] = acclayer.total_ofmap_size() * \
+                                           util.prod(mapping_repls.values())
+            if layer_type in (lte.CONV, lte.DW_CONV):
+                unit_access[me.ITCN][de.FIL] = acclayer.total_filter_size() * \
+                                               util.prod(mapping_repls.values())
             elif layer_type == lte.LOCAL:
                 unit_access[me.ITCN][de.FIL] = 0
+            else:
+                raise TypeError("Unsupported layer type {}".format(layer_type))
 
-            unit_access[me.REGF] = [acclayer.total_ops() * util.prod(mapping_repls.values())] * de.NUM
+
+            unit_access[me.REGF] = \
+                [acclayer.total_ops() * util.prod(mapping_repls.values())] * de.NUM
 
             sz_gbuf = [0] * de.NUM
             sz_gbuf[de.IFM] = acclayer.total_ifmap_size() * util.prod(mapping_repls.values())
             sz_gbuf[de.OFM] = acclayer.total_ofmap_size() * util.prod(mapping_repls.values())
-            if layer_type == lte.CONV:
-                sz_gbuf[de.FIL] = acclayer.total_ifmap_size() * util.prod(mapping_repls.values())
+            if layer_type in (lte.CONV, lte.DW_CONV):
+                sz_gbuf[de.FIL] = acclayer.total_filter_size() * util.prod(mapping_repls.values())
             else:
                 sz_gbuf[de.FIL] = 0
 
             sz_regf = [0] * de.NUM
-            if layer_type == lte.CONV:
+            if layer_type in (lte.CONV, lte.DW_CONV):
                 sz_regf[de.FIL] = 1
                 sz_regf[de.IFM] = 1
                 sz_regf[de.OFM] = 1
@@ -855,7 +712,6 @@ class KaplaSearcher:
             comp_bl_ts = [[1 for _ in range(3)] for _ in range(BL.NUM + 1)]
             comp_bl_ords = [[1 for _ in range(3)] for _ in range(BL.NUM)]
 
-            unset_ords = set()
             set_flags = [False] * le.NUM
             for lidx, dims in enumerate([["C"], ["K"], ["N", "XY"]]):
                 for dim in dims:
@@ -875,7 +731,8 @@ class KaplaSearcher:
                     counter += 1
 
             for bl in range(BL.NUM):
-                for order, didx in enumerate(sorted(range(len(comp_bl_ords[bl])), key=lambda k: comp_bl_ords[bl][k])):
+                for order, didx in enumerate(sorted(range(len(comp_bl_ords[bl])),
+                                                    key=lambda k: comp_bl_ords[bl][k])):
                     comp_bl_ords[bl][didx] = order
 
             for i in range(BL.NUM):
@@ -892,9 +749,6 @@ class KaplaSearcher:
             unit_access = tuple(unit_access)
             regf_reusable = tuple(regf_reusable)
 
-            print(bl_ords)
-            print(comp_bl_ords)
-
             nld = NestedLoopDesc(loopcnt=loopcnt, unit_access=unit_access, usize_gbuf=sz_gbuf,
                                  usize_regf=sz_regf, unit_ops=ops_lpe, unit_time=unit_time,
                                  data_loops=acclayer.data_loops(), regf_reusable=regf_reusable,
@@ -903,7 +757,8 @@ class KaplaSearcher:
             real_resource = resource._replace(size_gbuf=resource.size_gbuf / 0.99,
                                               size_regf=resource.size_regf / 0.99)
 
-            lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr, self.options)
+            lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr,
+                                     self.options)
             if not lbs.is_valid():
                 print("LBS INVALID!")
                 print("acclayer.nofm", acclayer.nofm)
@@ -919,6 +774,8 @@ class KaplaSearcher:
                 print("bl_ords", bl_ords)
                 print("comp_bl_ords", comp_bl_ords)
                 print("bufshr", tuple(bufshr.size(dce) for dce in range(de.NUM)))
+        else:
+            raise TypeError("Unsupported array mapping type {}".format(self.array_mapping))
 
         return lbs
 
@@ -931,10 +788,11 @@ class KaplaSearcher:
         # Inter-node data forwarding/rotation hops.
         node_nhops = lbs.get_noc_access()
         # Memory access hops.
-        mem_nhops = [unh * f for unh, f
-                     in zip(unit_nhops, lbs.get_top_level_fetch())]
+        print("Memory access hops:")
+        print(unit_nhops)
+        print(lbs.get_top_level_fetch())
+        mem_nhops = [unh * f for unh, f in zip(unit_nhops, lbs.get_top_level_fetch())]
         # Total hops = inter-node hops + memory hops.
-        # total_nhops = [nnh for nnh in node_nhops]
         total_nhops = [nnh + mnh for nnh, mnh in zip(node_nhops, mem_nhops)]
         cost_noc = self.unit_cost.noc_hop * sum(total_nhops)
         cost_node_nhops = self.unit_cost.noc_hop * sum(node_nhops)
@@ -943,7 +801,6 @@ class KaplaSearcher:
         cost_op = self.unit_cost.mac_op * lbs.ops
 
         cost_static = self.unit_cost.idl_unit * lbs.time
-        # cost_static = 0
 
         # Calculate the categorical access.
         access = lbs.get_access()
@@ -1007,8 +864,7 @@ class KaplaSearcher:
         scheme['node_nhops'] = node_nhops
         scheme['unit_nhops'] = unit_nhops
 
-        return SchedulingResult(scheme=scheme, ofmap_layout=ofmap_layout,
-                                sched_seq=sched_seq)
+        return SchedulingResult(scheme=scheme, ofmap_layout=ofmap_layout, sched_seq=sched_seq)
 
     def _gen_input_layout(self):
         input_layer = self.network.input_layer()
@@ -1021,9 +877,7 @@ class KaplaSearcher:
         ext_layer_names = self.network.ext_layers()
         ext_layers = [self.network[l] for l in ext_layer_names]
         ext_frngs = [FmapRange(FmapPosition(b=0, n=0, h=0, w=0),
-                               FmapPosition(b=self.batch_size,
-                                            n=ext_layer.nofm,
-                                            h=ext_layer.hofm,
+                               FmapPosition(b=self.batch_size, n=ext_layer.nofm, h=ext_layer.hofm,
                                             w=ext_layer.wofm))
                      for ext_layer in ext_layers]
 
@@ -1031,26 +885,20 @@ class KaplaSearcher:
 
         input_region = ext_region = self.resource.src_data_region
 
-        for part in partition.gen_partition(input_layer, self.batch_size,
-                                            input_region.dim, self.options,
-                                            guaranteed=True):
-            input_layout = DataLayout(
-                frngs=(input_frng,),
-                regions=(input_region,),
-                parts=(part.projection(input_region, appl2frng=True),))
+        for part in partition.gen_partition(input_layer, self.batch_size, input_region.dim,
+                                            self.options, guaranteed=True):
+            input_layout = DataLayout(frngs=(input_frng,), regions=(input_region,),
+                                      parts=(part.projection(input_region, appl2frng=True),))
 
-            ext_layout_dict = dict(zip(
-                ext_layer_names,
-                [DataLayout(
-                    frngs=(ext_frng,),
-                    regions=(ext_region,),
-                    parts=(part.projection(ext_region, appl2frng=True),))
-                    for ext_frng in ext_frngs])) if ext_layers else None
+            ext_layout_dict = dict(zip(ext_layer_names,
+                                       [DataLayout(frngs=(ext_frng,), regions=(ext_region,),
+                                                   parts=(part.projection(ext_region,
+                                                                          appl2frng=True),))
+                                        for ext_frng in ext_frngs])) if ext_layers else None
 
             yield input_layout, ext_layout_dict
 
-
-def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, part, buf_sharing,
+def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_parted_workload, part, buf_sharing,
                                 resource, constraint, array_mapping, unit_nhops, unit_cost, options):
     min_layer_df = None
     min_layer_vars = None
@@ -1077,12 +925,20 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
     dst_is_dram = (resource.dst_data_region.type == NodeRegion.DRAM)
 
     mapping = construct_array_mapping(layer_type, gbuf_workload, array_mapping, resource, conv_strds)
-    for loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, regf_repls in mapping.gen_array_mapping():
+    for loopcnt, unit_size, logic_region, regf_stack, origin_regf_update, unit_ops, regf_repls in \
+            mapping.gen_array_mapping():
         regf_stack_num = logic_region[0] * logic_region[1] * util.prod(regf_repls.values())
-        for knobs_tuple, bl_ts, real_cstr in generate_loop_blocking(loopcnt, constraint):
-            regf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, bl_ts[BL.REGF + 1], unit_size[BL.REGF])
+
+        bl_ts_prob = 0.1
+        lb_handle = generate_loop_blocking(loopcnt, constraint)
+        if search_method == sme.RANDOM_SEARCHER:
+            lb_handle = util.random_collect(lb_handle, bl_ts_prob)
+        for knobs_tuple, bl_ts, real_cstr in lb_handle:
+            regf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, bl_ts[BL.REGF + 1],
+                                                 unit_size[BL.REGF])
             gbuf_bl_tp = [bl_a * bl_b for bl_a, bl_b in zip(bl_ts[BL.REGF + 1], bl_ts[BL.REGF])]
-            gbuf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, gbuf_bl_tp, unit_size[BL.GBUF])
+            gbuf_tensor_dims = derive_tensor_dim(layer_type, knobs_tuple, gbuf_bl_tp,
+                                                 unit_size[BL.GBUF])
 
             regf_tensor_dims = tdm.format_tensor_dim(layer_type, regf_tensor_dims, conv_strds)
             gbuf_tensor_dims = tdm.format_tensor_dim(layer_type, gbuf_tensor_dims, conv_strds)
@@ -1101,9 +957,25 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
             if not (is_valid(tdm, layer_type, regf_tensor_dims, resource.size_regf) and
                     is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf, shr_node_num)):
                 continue
-            opt_out_bufshr = False
-            if is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf):
-                opt_out_bufshr = True
+
+            # opt_out_bufshr = False
+            # if is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf):
+            #     opt_out_bufshr = True
+
+            opt_out_bufshr = [False for _ in range(de.NUM)]
+            _shr_node = [1 for _ in range(de.NUM)]
+            for didx, node_num in enumerate(shr_node_num):
+                _shr_node[didx] = node_num
+
+            for d in range(de.NUM):
+                origin_shr_node = _shr_node[d]
+                _shr_node[d] = 1
+                if is_valid(tdm, layer_type, gbuf_tensor_dims, resource.size_gbuf, _shr_node):
+                    opt_out_bufshr[d] = True
+                else:
+                    _shr_node[d] = origin_shr_node
+            opt_out_bufshr = tuple(opt_out_bufshr)
+
 
             regf_updates = derive_update(tdm, layer_type, knobs_tuple, bl_ts[BL.REGF],
                                          regf_tensor_dims, conv_strds, origin_regf_update)
@@ -1113,25 +985,31 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
             accesses_result = [[0 for _ in range(de.NUM)] for _ in range(me.NUM)]
 
             g_init_datas, g_froz_init_datas = shape_init_data_block(tdm, gbuf_tensor_dims)
-            g_upd_dims, g_iter_times = cost_model.analyze_dim_iters(gbuf_tensor_dims, gbuf_updates, gbuf_workload)
-            g_logical_dim, g_buf_sharings, _, _ = cost_model.analyze_stacks(g_froz_init_datas, gbuf_stack,
-                                                                            resource.proc_region.dim,
-                                                                            None,
-                                                                            BL.GBUF)
-            gbuf_unit_accesses = cost_model.analyze_relevant_accesses(g_init_datas, g_upd_dims, g_iter_times)
+            g_upd_dims, g_iter_times = cost_model.analyze_dim_iters(gbuf_tensor_dims, gbuf_updates,
+                                                                    gbuf_workload)
+            g_logical_dim, g_buf_sharings, _, _ = \
+                cost_model.analyze_stacks(g_froz_init_datas, gbuf_stack, resource.proc_region.dim,
+                                          None, BL.GBUF)
+            gbuf_unit_accesses = cost_model.analyze_relevant_accesses(g_init_datas, g_upd_dims,
+                                                                      g_iter_times)
 
             r_init_datas, r_froz_init_datas = shape_init_data_block(tdm, regf_tensor_dims)
-            r_upd_dims, r_iter_times = cost_model.analyze_dim_iters(regf_tensor_dims, regf_updates, regf_workload)
+            r_upd_dims, r_iter_times = cost_model.analyze_dim_iters(regf_tensor_dims, regf_updates,
+                                                                    regf_workload)
             r_froz_updates = tuple(regf_updates)
             r_logical_dim, _, r_remote_sharings, r_temporal_sharings = \
-                cost_model.analyze_stacks(r_froz_init_datas, regf_stack, resource.dim_array, r_froz_updates, BL.REGF)
-            regf_unit_accesses = cost_model.analyze_relevant_accesses(r_init_datas, r_upd_dims, r_iter_times)
-            regf_upper_iters = cost_model.upper_fetch(r_upd_dims, r_iter_times, g_upd_dims, g_iter_times)
+                cost_model.analyze_stacks(r_froz_init_datas, regf_stack, resource.dim_array,
+                                          r_froz_updates, BL.REGF)
+            regf_unit_accesses = cost_model.analyze_relevant_accesses(r_init_datas, r_upd_dims,
+                                                                      r_iter_times)
+            regf_upper_iters = cost_model.upper_fetch(r_upd_dims, r_iter_times, g_upd_dims,
+                                                      g_iter_times)
 
             # Regfile accesses
             regf_accesses = [0 for _ in range(de.NUM)]
             flat_iter_times = r_iter_times + g_iter_times
-            if layer_type in (0, 2):
+            if layer_type in (lte.CONV, lte.DW_CONV, lte.CONV_BACK_H, lte.CONV_BACK_W,
+                              lte.DW_CONV_H, lte.DW_CONV_W):
                 regf_accesses[de.FIL] = unit_ops * util.prod(bl_ts[BL.REGF + 1]) * \
                                         util.prod(flat_iter_times) * gbuf_stack_num * \
                                         regf_stack_num
@@ -1151,10 +1029,12 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
             proc_time = unit_ops * util.prod(bl_ts[BL.REGF + 1]) * util.prod(flat_iter_times)
 
             bl_ord_counter = 0
-            for bl_ords in itertools.product(*[itertools.permutations(range(len(knobs_tuple))) for _ in range(BL.NUM)]):
+            for bl_ords in itertools.product(*[itertools.permutations(range(len(knobs_tuple)))
+                                               for _ in range(BL.NUM)]):
                 g_rd_iters = cost_model.redundant_iter(g_upd_dims, g_iter_times, bl_ords[BL.GBUF])
                 r_rd_iters = cost_model.redundant_iter(r_upd_dims, r_iter_times, bl_ords[BL.REGF])
 
+                trivial_iter = False
                 if resource.no_time_mux:
                     trivial_iter = True
                     for dim in tdm.get_dtype_rlvt_dims(layer_type, de.FIL):
@@ -1170,23 +1050,27 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                         g_rd_iters[de.FIL] = 0
                         g_rd_iters = tuple(g_rd_iters)
 
-                bufshr_rdt_iters = cost_model.bufshr_redundant_iter(g_upd_dims, g_iter_times, r_upd_dims,
-                                                                    r_iter_times, bl_ords[BL.REGF], tuple(g_rd_iters),
-                                                                    opt_out_bufshr)
+                bufshr_rdt_iters = \
+                    cost_model.bufshr_redundant_iter(g_upd_dims, g_iter_times, r_upd_dims,
+                                                     r_iter_times, bl_ords[BL.REGF],
+                                                     tuple(g_rd_iters), opt_out_bufshr)
 
                 # Inter-layer constraints
                 # batch, input, output update order
                 outermost = len(knobs_tuple) - 1
                 if "N" in knobs_tuple:
-                    if constraint.topbat > 1 and (constraint.topifm > 1 or constraint.topofm > 1) and \
+                    if constraint.topbat > 1 and \
+                            (constraint.topifm > 1 or constraint.topofm > 1) and \
                             bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("N"):
                         continue
                     outermost -= 1
                 if "C" in knobs_tuple:
-                    if (constraint.topifm > 1) and bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("C"):
+                    if (constraint.topifm > 1) and \
+                            bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("C"):
                         continue
                 if "K" in knobs_tuple:
-                    if (constraint.topofm > 1) and bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("K"):
+                    if (constraint.topofm > 1) and \
+                            bl_ords[BL.GBUF].index(outermost) != knobs_tuple.index("K"):
                         continue
                 # if data regions are not DRAM, can only access once, no spilling.
                 if (not src_is_dram) and (g_rd_iters[de.IFM] > 1):
@@ -1195,12 +1079,14 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                     continue
 
                 dram_accesses, fwd_hops, buf_shr_hops = \
-                    cost_model.analyze_gbuf_level_access(gbuf_unit_accesses, g_rd_iters, g_logical_dim,
-                                                         g_buf_sharings, bufshr_rdt_iters, options)
+                    cost_model.analyze_gbuf_level_access(gbuf_unit_accesses, g_rd_iters,
+                                                         g_logical_dim, g_buf_sharings,
+                                                         bufshr_rdt_iters, options)
                 gbuf_accesses, itcn_accesses = \
-                    cost_model.analyze_regf_level_access(regf_unit_accesses, r_rd_iters, r_logical_dim,
-                                                         r_remote_sharings, r_temporal_sharings,
-                                                         regf_upper_iters, gbuf_stack_num)
+                    cost_model.analyze_regf_level_access(regf_unit_accesses, r_rd_iters,
+                                                         r_logical_dim, r_remote_sharings,
+                                                         r_temporal_sharings, regf_upper_iters,
+                                                         gbuf_stack_num)
 
                 # inter-layer data sharing.
                 remote_gbuf_access = [0 for _ in range(de.NUM)]
@@ -1214,17 +1100,23 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 accesses_result[me.DRAM] = dram_accesses
                 accesses_result[me.GBUF] = gbuf_accesses
                 accesses_result[me.ITCN] = itcn_accesses
-                node_hops = [fwd_hop + bufshr_hop for fwd_hop, bufshr_hop in zip(fwd_hops, buf_shr_hops)]
+                node_hops = [fwd_hop + bufshr_hop for fwd_hop, bufshr_hop in
+                             zip(fwd_hops, buf_shr_hops)]
                 mem_hops = [unh * f for unh, f in zip(unit_nhops, g_rd_iters)]
 
                 # calculate the cost
                 cost_dict = dict()
-                cost_dict["dram_cost"] = sum(accesses_result[me.DRAM]) * unit_cost.mem_hier_at(me.DRAM)
-                cost_dict["sram_cost"] = sum(accesses_result[me.GBUF]) * unit_cost.mem_hier_at(me.GBUF)
-                cost_dict["itcn_cost"] = sum(accesses_result[me.ITCN]) * unit_cost.mem_hier_at(me.ITCN)
-                cost_dict["regf_cost"] = sum(accesses_result[me.REGF]) * unit_cost.mem_hier_at(me.REGF)
+                cost_dict["dram_cost"] = sum(accesses_result[me.DRAM]) * \
+                                         unit_cost.mem_hier_at(me.DRAM)
+                cost_dict["sram_cost"] = sum(accesses_result[me.GBUF]) * \
+                                         unit_cost.mem_hier_at(me.GBUF)
+                cost_dict["itcn_cost"] = sum(accesses_result[me.ITCN]) * \
+                                         unit_cost.mem_hier_at(me.ITCN)
+                cost_dict["regf_cost"] = sum(accesses_result[me.REGF]) * \
+                                         unit_cost.mem_hier_at(me.REGF)
 
-                cost_dict["remote_sram_cost"] = unit_cost.mem_hier_at(me.GBUF) * sum(remote_gbuf_access)
+                cost_dict["remote_sram_cost"] = unit_cost.mem_hier_at(me.GBUF) * \
+                                                sum(remote_gbuf_access)
                 cost_dict["node_hop_cost"] = sum(node_hops) * unit_cost.noc_hop
                 cost_dict["mem_hop_cost"] = sum(mem_hops) * unit_cost.noc_hop
                 cost_dict["op_cost"] = nndf_ops * unit_cost.mac_op
@@ -1246,6 +1138,7 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 # pp.pprint(knobs_tuple)
                 # pp.pprint(bl_ts)
                 # pp.pprint(bl_ords)
+                # pp.pprint(unit_nhops)
                 # print("")
                 # pp.pprint(g_upd_dims)
                 # pp.pprint("fil rlvt dims: {}".format(tdm.get_dtype_rlvt_dims(layer_type, de.FIL)))
@@ -1274,25 +1167,21 @@ def _search_layer_df_perprocess(layer_type, conv_strds, froz_parted_workload, pa
                 # pp.pprint(buf_shr_hops)
                 # pp.pprint(node_hops)
                 # pp.pprint(cost_dict)
+                # pp.pprint(total_cost)
 
-                # # compare with nn_dataflow cost
-                # nndf_lbs, nndf_cost = compare_with_nn_dataflow(layer_type, mapping, gbuf_workload, conv_strds,
-                #                                                loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords,
-                #                                                unit_ops, resource, buf_sharing, unit_cost, options)
-                # pp.pprint(nndf_cost)
-                # print("")
-                sorted_regf_updates = sort_update(regf_updates, bl_ords[BL.REGF], origin_regf_update)
+                sorted_regf_updates = sort_update(regf_updates, bl_ords[BL.REGF],
+                                                  origin_regf_update)
                 sorted_gbuf_updates = sort_update(gbuf_updates, bl_ords[BL.GBUF])
                 if total_cost < min_total_cost:
                     logic_region = mapping.logic_region
                     mapping_fold = mapping.fold
                     mapping_repls = mapping.repls.copy()
-                    min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part, conv_strds,
-                                      loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords, unit_ops, resource, buf_sharing,
-                                      accesses_result)
-                    min_layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack, sorted_gbuf_updates,
-                                                   regf_tensor_dims, regf_stack,
-                                                   sorted_regf_updates, buf_sharing)
+                    min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part,
+                                      conv_strds, loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords,
+                                      unit_ops, resource, buf_sharing, unit_nhops, g_logical_dim, g_buf_sharings, gbuf_unit_accesses, g_rd_iters, g_upd_dims, g_iter_times, bl_ords[BL.GBUF], accesses_result)
+                    min_layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack,
+                                                   sorted_gbuf_updates, regf_tensor_dims,
+                                                   regf_stack, sorted_regf_updates, buf_sharing)
                     min_total_cost = total_cost
                     min_layer_time = layer_time
                     min_cost_dict = cost_dict
@@ -1332,7 +1221,6 @@ def generate_loop_blocking(loopcnt, constraint):
             topofm = 1
         real_cstr = SimpleCstr(topbat, topifm, topofm)
 
-        # for bl_ords in itertools.product(*[itertools.permutations(range(len(knobs))) for _ in range(BL.NUM)]):
         if constraint.topbat and ("N" in knobs_tuple) and (constraint.topbat != topbat):
             continue
         if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
@@ -1360,7 +1248,7 @@ def derive_tensor_dim(layer_type, knobs_tuple, bl_t, unit_size):
         for kidx, knob in enumerate(knobs_tuple):
             repl_size.setdefault(knob, 1)
             repl_size[knob] *= bl_t[kidx]
-    elif layer_type == lte.LOCAL:
+    elif layer_type in (lte.LOCAL, lte.DW_CONV):
         for kidx, knob in enumerate(knobs_tuple):
             if knob == "K":
                 repl_size.setdefault("K", 1)
@@ -1370,7 +1258,7 @@ def derive_tensor_dim(layer_type, knobs_tuple, bl_t, unit_size):
             else:
                 repl_size.setdefault(knob, 1)
                 repl_size[knob] *= bl_t[kidx]
-    elif layer_type == lte.LOCAL_BACK_H:
+    elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
         for kidx, knob in enumerate(knobs_tuple):
             if knob == "C":
                 repl_size.setdefault("K", 1)
@@ -1397,7 +1285,7 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
             if dim in existed_upd_dims:
                 continue
             results.append((dim, stacked_dims[dim]))
-    elif layer_type == lte.LOCAL:
+    elif layer_type in (lte.LOCAL, lte.DW_CONV):
         for dim, t in zip(knobs_tuple, bl_t):
             if dim in existed_upd_dims:
                 continue
@@ -1407,7 +1295,7 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
                 results.append(("C", stacked_dims[dim] * conv_strds[2], "K", stacked_dims[dim]))
             else:
                 results.append((dim, stacked_dims[dim]))
-    elif layer_type == lte.LOCAL_BACK_H:
+    elif layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W):
         for dim, t in zip(knobs_tuple, bl_t):
             if dim in existed_upd_dims:
                 continue
@@ -1423,11 +1311,11 @@ def derive_update(tdm, layer_type, knobs_tuple, bl_t, stacked_dims, conv_strds, 
 
 
 def sort_update(unordered_updates, bl_ord, origin_updates=()):
-    return origin_updates + tuple(
-        x for x, _ in sorted(zip(unordered_updates[-len(bl_ord):], bl_ord), key=lambda item: item[1]))
+    return origin_updates + tuple(x for x, _ in sorted(
+        zip(unordered_updates[-len(bl_ord):], bl_ord), key=lambda item: item[1]))
 
 
-def search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, back_prop=False):
+def search_dataflow(search_method, network, batch_size, array_mapping, hw_fp, opt_fp, back_prop=False):
     hw = parse_json(hw_fp)
     resource, unit_cost = parse_hardware(hw)
 
@@ -1437,7 +1325,7 @@ def search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, back_prop
         print('run_back_prop(): back_prop should disable interlayer pipelining')
         sys.exit(1)
 
-    searcher = KaplaSearcher(network, array_mapping, batch_size, resource, unit_cost, options)
+    searcher = KaplaSearcher(search_method, network, array_mapping, batch_size, resource, unit_cost, options)
 
     tbeg = time.time()
     df_top = searcher.search_dataflow()
@@ -1477,7 +1365,6 @@ def search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, back_prop
                             in zip(nndf.total_accesses, unit_cost.mem_hier))
     total_noc_cost = nndf.total_noc_hops * unit_cost.noc_hop
     total_static_cost = nndf.total_time * unit_cost.idl_unit
-    # total_static_cost = 0
 
     total_access = [0 for _ in range(me.NUM)]
     total_rmt_gbuf_acc = 0
@@ -1512,44 +1399,45 @@ def argparser():
     ap.add_argument('net', help='network name, should be a .py file under "nns".')
     ap.add_argument('batch', type=int, help='batch_size')
     ap.add_argument('array_mapping', type=str, help='array-mapping')
+    ap.add_argument('--method', default='searcher', choices=['searcher', 'ml', 'random'],
+                    help='Method to find the optimal dataflow.')
     ap.add_argument('--back-prop', action='store_true', help='Run in back_propagation setting.')
     return ap
-
 
 def main():
     args = argparser().parse_args()
     print(args.net)
     network = import_network(args.net)
     batch_size = args.batch
+
     if args.array_mapping == 'eyeriss':
         array_mapping = ame.ROW_STATIONARY
     elif args.array_mapping == 'systolic':
         array_mapping = ame.SYSTOLIC
 
+    if args.method == 'searcher':
+        search_method = sme.KAPLA_SEARCHER
+    elif args.method == 'ml':
+        search_method = sme.ML_SEARCHER
+    elif args.method == 'random':
+        search_method = sme.RANDOM_SEARCHER
+    else:
+        raise ValueError('Invalid search method: {}'.format(args.method))
+
     if array_mapping == ame.ROW_STATIONARY:
         if args.back_prop:
             hw_fp = "nn_dataflow/hardwares/multi_node.json"
             opt_fp = "nn_dataflow/options/option_training.json"
-            search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp, args.back_prop)
+            search_dataflow(search_method, network, batch_size, array_mapping, hw_fp, opt_fp, args.back_prop)
         else:
             hw_fp = "nn_dataflow/hardwares/multi_node.json"
             opt_fp = "nn_dataflow/options/option_inference.json"
-            search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
+            search_dataflow(search_method, network, batch_size, array_mapping, hw_fp, opt_fp)
     elif array_mapping == ame.SYSTOLIC:
         hw_fp = "nn_dataflow/hardwares/single_node.json"
         opt_fp = "nn_dataflow/options/option_inference.json"
-        search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
-
-
-def sensitivity_test():
-    network = import_network("resnet50")
-    batch_size = 64
-    hw_fp = "nn_dataflow/hardwares/multi_node_4x4.json"
-    opt_fp = "nn_dataflow/options/option_inference.json"
-    array_mapping = ame.ROW_STATIONARY
-    search_dataflow(network, batch_size, array_mapping, hw_fp, opt_fp)
+        search_dataflow(search_method, network, batch_size, array_mapping, hw_fp, opt_fp)
 
 
 if __name__ == "__main__":
     sys.exit(main())
-    # sys.exit(sensitivity_test())

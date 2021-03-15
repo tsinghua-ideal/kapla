@@ -11,7 +11,8 @@ from nn_dataflow.core import partition
 from nn_dataflow import util
 from nn_dataflow.core import BufShrScheme
 from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackActLayer, \
-    ConvBackWeightLayer
+    ConvBackWeightLayer, DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer, \
+    DepthwiseConvolutionBackWeightLayer
 from nn_dataflow.core.map_strategy import MapStrategyEyeriss
 from nn_dataflow.core import NodeRegion
 from nn_dataflow.core import PhyDim2
@@ -106,6 +107,7 @@ def estimate_seg_cost(segment, network, options, cost):
     """
     Estimate the cost of the segment.
     """
+    print('estimate_seg_cost', segment.seg, flush=True)
     batch_size = segment.batch_size
 
     def _estimate_per_cstr_cost(constraint):
@@ -183,9 +185,10 @@ def _estimate_buf_ifm_ofm_lb(layer, buf_batch, resource):
     ratio of the total PE number over the number of ops per ifm-ofm pair.
     """
     total_pe = resource.proc_region.dim.size() * resource.dim_array.size()
-    if isinstance(layer, (ConvLayer, LocalRegionLayer)):
+    if isinstance(layer, (ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer)):
         layer_ops = layer.filter_size() * layer.ofmap_size(buf_batch)
-    elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+    elif isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                            DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer)):
         layer_ops = layer.filter_size() * layer.ifmap_size(buf_batch)
     return max(1, total_pe // layer_ops)
 
@@ -249,6 +252,23 @@ def _estimate_layer_occp(layer, batch_size, resource, constraint):
                 layer.ifmap_size(buf_bat) * buf_ifm)
 
         return occp
+
+    elif isinstance(layer, DepthwiseConvolutionLayer):
+        buf_ofm = layer.nofm // constraint.topofm if constraint.topofm else 1
+        occp = (layer.ofmap_size(buf_bat) * buf_ofm +
+                layer.ifmap_size(buf_bat) * buf_ofm +
+                buf_ofm * layer.filter_size())
+
+        return occp
+
+    elif isinstance(layer, (DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer)):
+        buf_ifm = layer.nifm // constraint.topifm if constraint.topifm else 1
+        occp = (layer.ofmap_size(buf_bat) * buf_ifm +
+                layer.ifmap_size(buf_bat) * buf_ifm +
+                buf_ifm * layer.filter_size())
+
+        return occp
+
     else:
         raise TypeError('Invalid layer type.')
 

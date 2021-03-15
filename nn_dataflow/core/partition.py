@@ -23,7 +23,8 @@ from .. import util
 from .fmap_range import FmapPosition, FmapRange
 from .int_range import IntRange
 from .layer import ConvLayer, LocalRegionLayer, ConvBackActLayer, \
-    ConvBackWeightLayer, LocalRegionBackLayer
+    ConvBackWeightLayer, LocalRegionBackLayer, DepthwiseConvolutionLayer, \
+    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .partition_scheme import PartitionScheme
 from .phy_dim2 import PhyDim2
 
@@ -72,7 +73,9 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
             else:
                 if not util.approx_dividable(layer.nofm, pdims[pe.OUTP].size()):
                     continue
-            if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer)):
+            if isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                                  DepthwiseConvolutionBackActLayer,
+                                  DepthwiseConvolutionBackWeightLayer)):
                 if not util.approx_dividable(layer.hifm, pdims[pe.OFMP].h) \
                         or not util.approx_dividable(layer.wifm, pdims[pe.OFMP].w):
                     continue
@@ -86,16 +89,19 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
                 if not util.approx_dividable(layer.nifm,
                                              pdims[pe.INPP].size()):
                     continue
-            elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
+            elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer,
+                                    DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                                    DepthwiseConvolutionBackWeightLayer)):
                 if pdims[pe.INPP].size() > 1:
                     continue
         else:
             assert not options.partition_ifmaps
             if pdims[pe.INPP].size() != 1:
                 continue
-            if  (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer,
-                LocalRegionBackLayer)) and layer.hifm == 1 and layer.wifm == 1) or \
-                (isinstance(layer, (ConvLayer, LocalRegionLayer)) and \
+            if  (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+                    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer)) and \
+                    layer.hifm == 1 and layer.wifm == 1) or \
+                (isinstance(layer, (ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer)) and \
                 layer.hofm == 1 and layer.wofm == 1):
                 # FC layer: no OFMP.
                 if pdims[pe.OFMP].size() != 1:
@@ -161,8 +167,9 @@ def gen_partition(layer, batch_size, dim_nodes, options, guaranteed=False):
         pdims = [PhyDim2(1, 1)] * pe.NUM
         order = range(pe.NUM)
 
-        if (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer,
-            LocalRegionBackLayer)) and layer.hifm == 1 and layer.wifm == 1) or \
+        if (isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer, LocalRegionBackLayer,
+            DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer)) and \
+            layer.hifm == 1 and layer.wifm == 1) or \
             (isinstance(layer, (ConvLayer, LocalRegionLayer)) and \
             layer.hofm == 1 and layer.wofm == 1):
             # Only OUTP, no OFMP.
@@ -264,6 +271,34 @@ def proc_data_range(layer, batch_size, part, pidx):
         w_beg, w_end = w_orng
         w_beg = util.reverse_low(w_beg, layer.wofm, layer.wreg, layer.wtrd)
         w_end = util.reverse_high(w_end, layer.wofm, layer.wreg, layer.wtrd)
+    elif isinstance(layer, DepthwiseConvolutionLayer):
+        # Ifmap channel partition.
+        n_beg, n_end = n_orng
+        n_end = min(layer.nifm, n_end)
+
+        # Fmap height tiling.
+        h_beg, h_end = h_orng
+        h_beg = h_beg * layer.htrd
+        h_end = max(h_beg, (h_end - 1) * layer.htrd + layer.hfil)
+
+        # Fmap width tiling.
+        w_beg, w_end = w_orng
+        w_beg = w_beg * layer.wtrd
+        w_end = max(w_beg, (w_end - 1) * layer.wtrd + layer.wfil)
+    elif isinstance(layer, (DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer)):
+        n_beg, n_end = n_orng
+        n_beg = util.reverse_low(n_beg, layer.nofm, 1, 1)
+        n_end = util.reverse_high(n_end, layer.nofm, 1, 1)
+
+        # Fmap height tiling.
+        h_beg, h_end = h_orng
+        h_beg = util.reverse_low(h_beg, layer.hofm, layer.hreg, layer.htrd)
+        h_end = util.reverse_high(h_end, layer.hofm, layer.hreg, layer.htrd)
+
+        # Fmap width tiling.
+        w_beg, w_end = w_orng
+        w_beg = util.reverse_low(w_beg, layer.wofm, layer.wreg, layer.wtrd)
+        w_end = util.reverse_high(w_end, layer.wofm, layer.wreg, layer.wtrd)
     else:
         raise ValueError("Invalid layer type: {}".format(layer))
 
@@ -278,6 +313,9 @@ def proc_data_range(layer, batch_size, part, pidx):
     elif isinstance(layer, (LocalRegionLayer, LocalRegionBackLayer)):
         # No filter.
         filrng = (IntRange(0, 0), IntRange(0, 0))
+    elif isinstance(layer, (DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                            DepthwiseConvolutionBackWeightLayer)):
+        filrng = (IntRange(0, 1), ofrng.beg_end('n'))
     else:
         raise ValueError("Invalid layer type: {}".format(layer))
 
