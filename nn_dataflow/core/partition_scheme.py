@@ -200,7 +200,7 @@ class PartitionScheme(namedtuple('PartitionScheme', PARTITION_SCHEME_LIST)):
             if self.pdims[pe.INPP].size() > 1:
                 raise ValueError('PartitionScheme: input partitioning is '
                                  'invalid for LocalRegionLayer.')
-            r_nofm = util.reverse_high(p_nofm-1, layer.nofm, layer.nreg, layer.ntrd) + 1
+            r_nofm = util.reverse_high(p_nofm-1, layer.nofm, 1, 1) + 1
             p_layer = DepthwiseConvolutionLayer(
                     r_nofm, (r_hofm, r_wofm), (layer.hfil, layer.wfil),
                     strd=(layer.htrd, layer.wtrd), rw_data=layer.rw_data)

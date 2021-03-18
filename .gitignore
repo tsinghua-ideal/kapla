@@ -12,6 +12,7 @@ settings.json
 
 # Log related.
 *.log
+.profile
 
 bp_collection/
 systolic_collection/

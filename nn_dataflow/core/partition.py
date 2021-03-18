@@ -292,13 +292,13 @@ def proc_data_range(layer, batch_size, part, pidx):
 
         # Fmap height tiling.
         h_beg, h_end = h_orng
-        h_beg = util.reverse_low(h_beg, layer.hofm, layer.hreg, layer.htrd)
-        h_end = util.reverse_high(h_end, layer.hofm, layer.hreg, layer.htrd)
+        h_beg = util.reverse_low(h_beg, layer.hofm, layer.hfil, layer.htrd)
+        h_end = util.reverse_high(h_end, layer.hofm, layer.hfil, layer.htrd)
 
         # Fmap width tiling.
         w_beg, w_end = w_orng
-        w_beg = util.reverse_low(w_beg, layer.wofm, layer.wreg, layer.wtrd)
-        w_end = util.reverse_high(w_end, layer.wofm, layer.wreg, layer.wtrd)
+        w_beg = util.reverse_low(w_beg, layer.wofm, layer.wfil, layer.wtrd)
+        w_end = util.reverse_high(w_end, layer.wofm, layer.wfil, layer.wtrd)
     else:
         raise ValueError("Invalid layer type: {}".format(layer))
 

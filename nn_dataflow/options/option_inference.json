@@ -18,7 +18,7 @@
     "layer_pipeline_opt": true,
     "opt_goal": "e",
     "ntops": 1,
-    "nprocesses": 1,
+    "nprocesses": 8,
     "verbose": true
   }
 }

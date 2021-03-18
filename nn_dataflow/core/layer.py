@@ -961,36 +961,42 @@ class DepthwiseConvolutionBackActLayer(Layer):
         self.inlayer = Layer(nifm, (hifm, wifm))
         self.rw_data = de.OFM
 
-        @staticmethod
-        def data_loops():
-            dls = [None] * de.NUM
-            dls[de.FIL] = DataDimLoops(le.OFM)
-            dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
-            dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
-            return tuple(dls)
+    @staticmethod
+    def data_loops():
+        dls = [None] * de.NUM
+        dls[de.FIL] = DataDimLoops(le.OFM)
+        dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
+        dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+        return tuple(dls)
 
-        def input_layer(self):
-            return self.inlayer
+    def input_layer(self):
+        return self.inlayer
 
-        def ops_per_neuron(self):
-            return self.region_size()
+    def ops_per_neuron(self):
+        return self.region_size()
 
-        def total_ops(self, batch_size=1):
-            return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
-                                             (self.hfil, self.wfil),
-                                             (self.htrd, self.wtrd)).total_ops(batch_size)
+    def total_ops(self, batch_size=1):
+        return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
+                                            (self.hfil, self.wfil),
+                                            (self.htrd, self.wtrd)).total_ops(batch_size)
 
-        def region_size(self):
-            return self.hfil * self.wfil
+    def region_size(self):
+        return self.hfil * self.wfil
 
-        def __repr__(self):
-            return '{}({})'.format(
-                self.__class__.__name__,
-                ', '.join([
-                    'nofm={}'.format(repr(self.nofm)),
-                    'sofm={}'.format(repr((self.hofm, self.wofm))),
-                    'sfil={}'.format(repr((self.hfil, self.wfil))),
-                    'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+    def filter_size(self, word_size=1):
+        return self.hfil * self.wfil * word_size
+
+    def total_filter_size(self, word_size=1):
+        return self.nofm * self.filter_size(word_size)
+
+    def __repr__(self):
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join([
+                'nofm={}'.format(repr(self.nofm)),
+                'sofm={}'.format(repr((self.hofm, self.wofm))),
+                'sfil={}'.format(repr((self.hfil, self.wfil))),
+                'strd={}'.format(repr((self.htrd, self.wtrd)))]))
 
 
 class DepthwiseConvolutionBackWeightLayer(Layer):
@@ -1038,33 +1044,39 @@ class DepthwiseConvolutionBackWeightLayer(Layer):
         self.inlayer = Layer(nifm, (hifm, wifm))
         self.rw_data = de.FIL
 
-        @staticmethod
-        def data_loops():
-            dls = [None] * de.NUM
-            dls[de.FIL] = DataDimLoops(le.OFM)
-            dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
-            dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
-            return tuple(dls)
+    @staticmethod
+    def data_loops():
+        dls = [None] * de.NUM
+        dls[de.FIL] = DataDimLoops(le.OFM)
+        dls[de.IFM] = DataDimLoops(le.OFM, le.BAT)
+        dls[de.OFM] = DataDimLoops(le.OFM, le.BAT)
+        return tuple(dls)
 
-        def input_layer(self):
-            return self.inlayer
+    def input_layer(self):
+        return self.inlayer
 
-        def ops_per_neuron(self):
-            return self.region_size()
+    def ops_per_neuron(self):
+        return self.region_size()
 
-        def total_ops(self, batch_size=1):
-            return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
-                                             (self.hfil, self.wfil),
-                                             (self.htrd, self.wtrd)).total_ops(batch_size)
+    def total_ops(self, batch_size=1):
+        return DepthwiseConvolutionLayer(self.nofm, (self.hifm, self.wifm),
+                                            (self.hfil, self.wfil),
+                                            (self.htrd, self.wtrd)).total_ops(batch_size)
 
-        def region_size(self):
-            return self.hfil * self.wfil
+    def region_size(self):
+        return self.hfil * self.wfil
 
-        def __repr__(self):
-            return '{}({})'.format(
-                self.__class__.__name__,
-                ', '.join([
-                    'nofm={}'.format(repr(self.nofm)),
-                    'sofm={}'.format(repr((self.hofm, self.wofm))),
-                    'sfil={}'.format(repr((self.hfil, self.wfil))),
-                    'strd={}'.format(repr((self.htrd, self.wtrd)))]))
+    def filter_size(self, word_size=1):
+        return self.hfil * self.wfil * word_size
+
+    def total_filter_size(self, word_size=1):
+        return self.nofm * self.filter_size(word_size)
+
+    def __repr__(self):
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join([
+                'nofm={}'.format(repr(self.nofm)),
+                'sofm={}'.format(repr((self.hofm, self.wofm))),
+                'sfil={}'.format(repr((self.hfil, self.wfil))),
+                'strd={}'.format(repr((self.htrd, self.wtrd)))]))

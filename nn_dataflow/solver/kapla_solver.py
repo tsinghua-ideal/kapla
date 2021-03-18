@@ -43,9 +43,6 @@ class KaplaSolver:
         self.ntops = ntops
         self.ilp = InterLayerPipeline(network, batch_size, resource)
         self.ordered_layer_list = self.ilp.ordered_layer_list()
-        print('start solve segment')
-        self.selected_segments = self.solve_segment(explore_n_seg_sets=4)
-        print('finish solve segment')
         self.initial_layout_idx = 0
         if array_mapping == ame.ROW_STATIONARY:
             self.tdm = RSTensorDimMap()
@@ -53,7 +50,12 @@ class KaplaSolver:
             self.tdm = SystolicTensorDimMap()
         else:
             raise ValueError("No corresponding array mapping: {}".format(array_mapping))
+
         self.cost_model = KaplaCostModel(self.tdm)
+
+        print('start solve segment')
+        self.selected_segments = self.solve_segment(explore_n_seg_sets=4)
+        print('finish solve segment')
 
     def solve_dataflow(self):
         df_tops = defaultdict(lambda: None)
@@ -137,7 +139,8 @@ class KaplaSolver:
                 segments[seg[-1][-1]].append(seg)
         selected_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
                                             self.unit_cost, self.options,
-                                            explore_n_seg_sets=explore_n_seg_sets)
+                                            explore_n_seg_sets=explore_n_seg_sets,
+                                            nprocesses=self.options.nprocesses)
         # selected_segments = segments
         return selected_segments
 
@@ -811,8 +814,8 @@ class KaplaSolver:
                frozenset(tensor_repl_dict.items())
 
     def tensor_div(self, layer_type, conv_strds, tensor, dim, factor):
-        if (layer_type == lte.LOCAL and dim == "K") or \
-                (layer_type == lte.LOCAL_BACK_H and dim == "C"):
+        if (layer_type in (lte.LOCAL, lte.DW_CONV) and dim == "K") or \
+                (layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W) and dim == "C"):
             tensor["C"] /= factor
             tensor["K"] /= factor
         else:
@@ -831,8 +834,8 @@ class KaplaSolver:
         return tensor
 
     def tensor_mul(self, layer_type, conv_strds, tensor, dim, factor):
-        if (layer_type == lte.LOCAL and dim == "K") or \
-                (layer_type == lte.LOCAL_BACK_H and dim == "C"):
+        if (layer_type in (lte.LOCAL, lte.DW_CONV) and dim == "K") or \
+                (layer_type in (lte.LOCAL_BACK_H, lte.DW_CONV_H, lte.DW_CONV_W) and dim == "C"):
             tensor["C"] *= factor
             tensor["K"] *= factor
         else:
@@ -2158,7 +2161,7 @@ def main():
 
 
 def test_function():
-    network = import_network("alex_net")
+    network = import_network("mobilenet")
     batch_size = 64
     array_mapping = ame.ROW_STATIONARY
     hw_fp = "nn_dataflow/hardwares/multi_node.json"

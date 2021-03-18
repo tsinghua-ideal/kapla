@@ -39,7 +39,7 @@ NN.add('pooling13', PoolingLayer(1024, 1, 7))
 NN.add('fc', FCLayer(1024, 1000))
 
 NN.add('fc_back', FCBackActLayer(1000, 1024))
-NN.add('pooling13_back', PoolingBackLayer(512, 7, 1))
+NN.add('pooling13_back', PoolingBackLayer(1024, 7, 7))
 NN.add('point_conv13_back', ConvBackActLayer(1024, 1024, 7, 1, 1))
 NN.add('dep_conv13_back', DepthwiseConvolutionBackActLayer(1024, 7, 3, 1))
 NN.add('point_conv12_back', ConvBackActLayer(1024, 512, 7, 1, 1))
@@ -64,7 +64,7 @@ NN.add('dep_conv1_back', DepthwiseConvolutionBackActLayer(32, 112, 3, 1))
 NN.add('conv0_back', ConvBackActLayer(32, 3, 224, 3, 2))
 
 NN.add('fc_back_w', FCBackWeightLayer(1000, 1024), prevs=('fc'))
-NN.add('pooling13_back_w', PoolingBackLayer(512, 7, 1), prevs=('fc_back'))
+NN.add('pooling13_back_w', PoolingBackLayer(1024, 7, 7), prevs=('fc_back'))
 NN.add('point_conv13_back_w', ConvBackWeightLayer(1024, 1024, 7, 1, 1), prevs=('pooling13_back'))
 NN.add('dep_conv13_back_w', DepthwiseConvolutionBackWeightLayer(1024, 7, 3, 1),
        prevs=('point_conv13_back'))

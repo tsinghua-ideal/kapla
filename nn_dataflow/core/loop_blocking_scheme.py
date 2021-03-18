@@ -133,6 +133,9 @@ class LoopBlockingScheme():
         # Conservatively check size.
         if self.data_size(BL.REGF) > resource.size_regf \
                 or self.data_size(BL.GBUF) > resource.size_gbuf:
+            # print('conservatively check size')
+            # print(f'invalid: regf_ds{self.data_size(BL.REGF)}, regf_size{resource.size_regf}',
+            #       f'invalid: gbuf_ds{self.data_size(BL.GBUF)}, gbuf_size{resource.size_gbuf}')
             self.valid = False
             # print("!Invalid 0: regf: ds {}, resource {} gbuf: ds {}, resource {}".format(
             #       self.data_size(BL.REGF), resource.size_regf, self.data_size(BL.GBUF), resource.size_gbuf))
@@ -155,16 +158,16 @@ class LoopBlockingScheme():
         # If data regions are not DRAM, can only access once, no spilling.
         if not self.src_is_dram:
             if self.fetch[BL.GBUF][de.IFM] > 1:
+                # print(f"invalid: fetch {self.fetch}")
                 self.valid = False
-                # print("!Invalid 1")
                 return
             if resource.src_data_region == resource.proc_region:
                 # Force to store in gbuf.
                 self.stored_in_gbuf[de.IFM] = True
         if not self.dst_is_dram:
             if self.fetch[BL.GBUF][self.nld.rw_data] > 1:
+                # print(f'invalid: fetch {self.fetch}')
                 self.valid = False
-                # print("!Invalid 2")
                 return
             if resource.dst_data_region == resource.proc_region:
                 # Force to store in gbuf.
@@ -185,7 +188,9 @@ class LoopBlockingScheme():
         # Recheck size.
         if self.data_size(BL.REGF) > resource.size_regf \
                 or self.data_size(BL.GBUF) > resource.size_gbuf:
-            # print("!Invalid 3")
+            # print('recheck size')
+            # print(f'invalid: regf_ds{self.data_size(BL.REGF)}, regf_size{resource.size_regf}',
+            #       f'invalid: gbuf_ds{self.data_size(BL.GBUF)}, gbuf_size{resource.size_gbuf}')
             self.valid = False
             return
 
