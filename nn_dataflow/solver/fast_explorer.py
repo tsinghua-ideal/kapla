@@ -1,5 +1,6 @@
 from collections import defaultdict
 from multiprocessing import Pool
+import math
 import itertools
 import fastcache
 import heapq
@@ -7,13 +8,14 @@ import heapq
 from nn_dataflow.core import data_category_enum as de
 from nn_dataflow.core import loop_enum as le
 from nn_dataflow.core import mem_hier_enum as me
+from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
 from nn_dataflow.core import partition
 from nn_dataflow import util
 from nn_dataflow.core import BufShrScheme
 from nn_dataflow.core import LocalRegionLayer, ConvLayer, LocalRegionBackLayer, ConvBackActLayer, \
     ConvBackWeightLayer, DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer, \
     DepthwiseConvolutionBackWeightLayer
-from nn_dataflow.core.map_strategy import MapStrategyEyeriss
+from nn_dataflow.core.map_strategy import MapStrategyEyeriss, MapStrategySystolic
 from nn_dataflow.core import NodeRegion
 from nn_dataflow.core import PhyDim2
 
@@ -23,7 +25,7 @@ Fast explorer for a quick schedule on nn dataflow.
 '''
 
 
-def gen_segment_set(segments, ordered_layer_list, network, cost, options, explore_n_seg_sets=4,
+def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, options, explore_n_seg_sets=4,
                     nprocesses=8):
     """
     Generate a set of best segments that are preferred to schedule.
@@ -56,7 +58,7 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
     handler_list = []
 
     for idx, segment in enumerate(ordered_segments):
-        r = apply_func(estimate_seg_cost, (segment, network, options, cost))
+        r = apply_func(estimate_seg_cost, (segment, network, options, array_mapping, cost))
         handler_list.append(r)
 
     seg_cost_list = list(map(retrieve_func, handler_list))
@@ -65,7 +67,11 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
         pool.close()
         pool.join()
 
+
+    print('Start DP -----------------')
+    print('ordered_segments:', [seg.seg for seg in ordered_segments])
     for idx, segment in enumerate(ordered_segments):
+        print('cand:', segment)
         # Solve the constraint with least buffer occupation.
         min_cost = seg_cost_list[idx]
 
@@ -81,7 +87,10 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
 
         # Update dp tracker.
         last_layer = segment.seg[-1][-1]
-        opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[:num_top_segs]
+        opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[0][:num_top_segs]
+        print('last_layer: ', last_layer, opt_segments[last_layer])
+
+    raise ValueError("Interrupt as intended.")
 
     seg_set = set()
     for cost_seg in opt_segments[ordered_layer_list[-1]]:
@@ -103,13 +112,11 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, options, explor
     return new_segments
 
 
-def estimate_seg_cost(segment, network, options, cost):
+def estimate_seg_cost(segment, network, options, array_mapping, cost):
     """
     Estimate the cost of the segment.
     """
-    print('estimate_seg_cost', segment.seg, flush=True)
     batch_size = segment.batch_size
-
     def _estimate_per_cstr_cost(constraint):
         """ Estimate the cost of the segment under a given constraint. """
         min_cost = 0
@@ -122,13 +129,14 @@ def estimate_seg_cost(segment, network, options, cost):
             # corresponding layer's cost.
             min_part_cost = min(
                 estimate_layer_cost(
-                    layer, batch_size, p, rsrc, cstr, cost, options)
+                    layer, batch_size, p, rsrc, cstr, cost, array_mapping, options)
                 for p in partition.gen_partition(
                     layer, batch_size, rsrc.proc_region.dim, options,
                     guaranteed=True))
             if min_part_cost == float('inf'):
                 return float('inf')
             min_cost += min_part_cost
+
         return min_cost
 
     # Sequentially search constraints.
@@ -144,19 +152,9 @@ def estimate_seg_cost(segment, network, options, cost):
         if min_cost < float('inf'):
             break
 
+    print('estimate_seg_cost', segment.seg, 'min_cost', min_cost, flush=True)
+
     return min_cost
-
-
-def gen_partition_list(layer, batch_size, resource, constraint, cost, options, explore_n_parts=5):
-    """
-    Generate the best partition schemes that are preferred to schedule.
-    """
-    return SortedIterator(
-        partition.gen_partition(layer, batch_size, resource.proc_region.dim, options,
-                                guaranteed=True),
-        counter=explore_n_parts,
-        key=lambda part: estimate_layer_cost(layer, batch_size, part, resource,
-                                             constraint, cost, options))
 
 
 def segment_occp_is_valid(seg_tuple, network, batch_size, constraint,
@@ -333,7 +331,7 @@ def partition_occp_is_valid(part, layer, batch_size, resource, constraint,
 
 
 @fastcache.clru_cache(maxsize=1024)
-def estimate_layer_cost(layer, batch_size, part, resource, constraint, cost,
+def estimate_layer_cost(layer, batch_size, part, resource, constraint, cost, array_mapping,
                         options):
     """
     Estimate the cost of the layer under the given partition scheme.
@@ -346,11 +344,27 @@ def estimate_layer_cost(layer, batch_size, part, resource, constraint, cost,
     ac = _estimate_layer_accesses(layer, batch_size, part, resource,
                                   constraint, options)
     # Estimate NoC hops.
+    if options.hw_access_forwarding or options.hw_gbuf_sharing:
+        bufshr = get_bufshr_scheme(resource.proc_region, part, layer.data_loops())
+    else:
+        bufshr = None
     mh = _estimate_layer_mem_nhops(layer, batch_size, part, resource,
-                                   constraint, options)
+                                   constraint, bufshr, options)
 
-    layer_cost = sum(ac[mhe] * cost.mem_hier_at(mhe)
-                     for mhe in range(me.NUM)) + sum(mh) * cost.noc_hop
+    if options.opt_goal in ('d', 'ed'):
+        # Estimate processing time.
+        proc_time = _estimate_layer_proc_time(layer, batch_size, part, resource, constraint,
+                                              array_mapping, options)
+        bus_time = util.idivc(int(math.ceil(1. * max(ac[me.GBUF])
+                                            / resource.proc_region.dim.size())),
+                              resource.array_bus_width)
+        dram_time = int(math.ceil(sum(ac[me.DRAM])
+                                  / resource.dram_bandwidth))
+        layer_cost = max(proc_time, bus_time, dram_time)
+    else:
+        layer_cost = sum(ac[mhe] * cost.mem_hier_at(mhe)
+                        for mhe in range(me.NUM)) + sum(mh) * cost.noc_hop
+
     return layer_cost
 
 
@@ -397,7 +411,7 @@ def _estimate_layer_accesses(layer, batch_size, part, resource, constraint,
 
 
 def _estimate_layer_mem_nhops(layer, batch_size, part, resource, constraint,
-                              options):
+                              bufshr, options):
     p_layer, p_batch, _ = part.part_layer(layer, batch_size)
 
     def _centralize_node(region):
@@ -432,8 +446,7 @@ def _estimate_layer_mem_nhops(layer, batch_size, part, resource, constraint,
     except AttributeError:
         pass
 
-    if options.hw_access_forwarding or options.hw_gbuf_sharing:
-        bufshr = BufShrScheme(resource.proc_region, part, layer.data_loops())
+    if bufshr is not None:
         bufshr_size = tuple(bufshr.size(dce) for dce in range(de.NUM))
 
         # Use bufshr_size to estimate data-forwarding hops within
@@ -450,6 +463,33 @@ def _estimate_layer_mem_nhops(layer, batch_size, part, resource, constraint,
 
     layer_mh = [s * d * f for s, d, f in zip(data_sizes, dists, fetches)]
     return layer_mh
+
+
+def _estimate_layer_proc_time(layer, batch_size, part, resource, constraint, array_mapping, options):
+    # nld.unit_time * lcnt
+
+    p_layer, p_batch, p_occ = part.part_layer(layer, batch_size)
+
+    reverse_mapping = isinstance(layer, (ConvBackActLayer, ConvBackWeightLayer,
+        LocalRegionBackLayer, DepthwiseConvolutionBackActLayer,
+        DepthwiseConvolutionBackWeightLayer))
+
+    if array_mapping == ame.ROW_STATIONARY:
+        am = MapStrategyEyeriss(p_layer, p_batch, p_occ, resource.dim_array, reverse_mapping)
+    elif array_mapping == ame.SYSTOLIC:
+        am = MapStrategySystolic(p_layer, p_batch, p_occ, resource.dim_array, reverse_mapping)
+
+    _, unit_time, _, _, _, _ = am._calc_unitpass()
+    lcnts = []
+    for lcnt, _, _, _ in am._gen_repl():
+        lcnts.append(util.prod(lcnt))
+
+    return unit_time * sum(lcnts) / len(lcnts)
+
+
+@fastcache.clru_cache(maxsize=1024)
+def get_bufshr_scheme(proc_region, part, data_loops):
+    return BufShrScheme(proc_region, part, data_loops)
 
 
 def _filter_is_fully_buffered(p_layer, p_batch, constraint, bufshr_size,

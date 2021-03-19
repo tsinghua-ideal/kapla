@@ -12,10 +12,10 @@ settings.json
 
 # Log related.
 *.log
-.profile
+*.profile
 
 bp_collection/
 systolic_collection/
 row_stationary_collection/
-
 nndf_collect/
+profiling_script.py

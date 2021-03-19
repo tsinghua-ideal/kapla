@@ -117,7 +117,15 @@ class KaplaSolver:
                 # Select best seg df.
                 if len(seg_dfs) == 0:
                     continue
-                top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
+                if self.options.opt_goal == 'e':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
+                elif self.options.opt_goal == 'd':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-3])[0]
+                elif self.options.opt_goal == 'ed':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*x[-3])[0]
+                else:
+                    raise ValueError(f'Kapla solver: Invalid opt goal {self.options.opt_goal}')
+
                 nndf_result = nn_rearrange(top_seg_df, prev_df)
                 nndf_list.append(nndf_result)
                 seg_no_counter += 1
@@ -126,6 +134,16 @@ class KaplaSolver:
             # Select best nndf.
             if len(nndf_list) == 0:
                 continue
+
+            if self.options.opt_goal == 'e':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
+            elif self.options.opt_goal == 'd':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-3])[0]
+            elif self.options.opt_goal == 'ed':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1]*x[-3])[0]
+            else:
+                raise ValueError(f'Kapla solver: Invalid opt goal {self.options.opt_goal}')
+
             df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
             nndf_tops[layer_name] = df_tops[layer_name][3]
             layer_counter += 1
@@ -138,7 +156,7 @@ class KaplaSolver:
             if seg not in segments[seg[-1][-1]]:
                 segments[seg[-1][-1]].append(seg)
         selected_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
-                                            self.unit_cost, self.options,
+                                            self.unit_cost, self.array_mapping, self.options,
                                             explore_n_seg_sets=explore_n_seg_sets,
                                             nprocesses=self.options.nprocesses)
         # selected_segments = segments
@@ -229,6 +247,7 @@ class KaplaSolver:
 
     @functools.lru_cache(maxsize=1024)
     def solve_layer_df(self, layer_name, cstr, resource, ifmap_layout, seg_idx, sp_idx, tm_idx):
+        opt_value = float("inf")
         min_cost = float("inf")
         min_cost_dict = dict()
         min_layer_time = float("inf")
@@ -458,7 +477,34 @@ class KaplaSolver:
                                   gbuf_workload, regf_ops_iter, regf_stack_num, gbuf_stack_num,
                                   unit_ops, tuple(unit_nhops), resource)
 
-            if total_cost < min_cost:
+            if self.options.opt_goal == 'e' and (total_cost < opt_value):
+                opt_value = total_cost
+                min_cost = total_cost
+                min_layer_time = layer_time
+                min_cost_dict = cost_dict
+                min_cstr = real_cstr
+                min_accesses_result = accesses_result
+                min_noc_hops = noc_hops
+                layer_cand = self.finalize_layer_df(regf_unit_tensor, regf_updates, regf_stacks,
+                                                    gbuf_unit_tensor, gbuf_updates, gbuf_stacks)
+                min_sched_var = (layer_type, layer, gbuf_stacks, mapping, conv_strds,
+                                 regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
+                                 gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
+            elif self.options.opt_goal == 'd' and (layer_time < opt_value):
+                opt_value = layer_time
+                min_cost = total_cost
+                min_layer_time = layer_time
+                min_cost_dict = cost_dict
+                min_cstr = real_cstr
+                min_accesses_result = accesses_result
+                min_noc_hops = noc_hops
+                layer_cand = self.finalize_layer_df(regf_unit_tensor, regf_updates, regf_stacks,
+                                                    gbuf_unit_tensor, gbuf_updates, gbuf_stacks)
+                min_sched_var = (layer_type, layer, gbuf_stacks, mapping, conv_strds,
+                                 regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
+                                 gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
+            elif self.options.opt_goal == 'ed' and ((total_cost * layer_time) < opt_value):
+                opt_value = total_cost * layer_time
                 min_cost = total_cost
                 min_layer_time = layer_time
                 min_cost_dict = cost_dict
