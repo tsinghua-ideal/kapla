@@ -127,14 +127,31 @@ class KaplaSearcher:
                 # Select best seg df.
                 if len(seg_dfs) == 0:
                     continue
-                top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
+                if self.options.opt_goal == 'e':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
+                elif self.options.opt_goal == 'd':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: sum(x[-3]))[0]
+                elif self.options.opt_goal == 'ed':
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*sum(x[-3]))[0]
+                else:
+                    raise ValueError('Kapla searcher: Invalid opt goal {}'.format(self.options.opt_goal))
                 nndf_result = nn_rearrange(top_seg_df, prev_df)
                 nndf_list.append(nndf_result)
                 seg_no_counter += 1
                 seg_counter += 1
+
             if len(nndf_list) == 0:
                 continue
-            df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
+
+            if self.options.opt_goal == 'e':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
+            elif self.options.opt_goal == 'd':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-3])[0]
+            elif self.options.opt_goal == 'ed':
+                df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1]*x[-3])[0]
+            else:
+                raise ValueError('Kapla searcher: Invalid opt goal {}'.format(self.options.opt_goal))
+
             nndf_tops[layer_name] = df_tops[layer_name][3]
             layer_counter += 1
 
@@ -184,7 +201,7 @@ class KaplaSearcher:
                                                           for p in ifmap_layout.parts))
                 # Search the layer's dataflow.
                 if self.search_method in {sme.KAPLA_SEARCHER, sme.RANDOM_SEARCHER}:
-                    df, cost_dict, layer_time, real_cstr, sched_vars = \
+                    df, real_cstr, cost_dict, layer_time, sched_vars, accesses_result, noc_hops = \
                         self.search_layer_df(layer_name, cur_cstr, resource, ifmap_layout)
                 elif self.search_method == sme.ML_SEARCHER:
                     result = self.xgbtuner.search(self.network[layer_name], self.batch_size,
@@ -229,10 +246,13 @@ class KaplaSearcher:
 
     @functools.lru_cache(maxsize=1024)
     def search_layer_df(self, layer_name, cstr, resource, ifmap_layout):
+        opt_value = float('inf')
         min_cost = float("inf")
         min_cost_dict = dict()
         min_layer_time = float("inf")
         min_cstr = None
+        min_noc_hops = None
+        min_accesses_result = None
         min_layer_df = None
         min_layer_vars = None
 
@@ -296,22 +316,49 @@ class KaplaSearcher:
                             self.unit_cost, self.options))
             results.append(r)
 
-        for (layer_df, cost_dict, layer_time, real_cstr, layer_vars) in retrieve_func():
+        for (layer_df, cost_dict, layer_time, real_cstr, noc_hops, accesses_result,
+             layer_vars) in retrieve_func():
             if layer_df is None:
                 continue
-            if sum(cost_dict.values()) < min_cost:
+            if self.options.opt_goal == 'e' and (sum(cost_dict.values()) < opt_value):
                 min_cost = sum(cost_dict.values())
+                opt_value = min_cost
                 min_layer_vars = layer_vars
                 min_cost_dict = cost_dict
                 min_layer_time = layer_time
                 min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
+                min_layer_df = layer_df
+            elif self.options.opt_goal == 'd' and (sum(layer_time) < opt_value):
+                opt_value = sum(layer_time)
+                min_cost = sum(cost_dict.values())
+                opt_value = min_cost
+                min_layer_vars = layer_vars
+                min_cost_dict = cost_dict
+                min_layer_time = layer_time
+                min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
+                min_layer_df = layer_df
+            elif self.options.opt_goal == 'ed' and ((sum(cost_dict.values()) * sum(layer_time)) < opt_value):
+                opt_value = sum(cost_dict.values()) * sum(layer_time)
+                min_cost = sum(cost_dict.values())
+                opt_value = min_cost
+                min_layer_vars = layer_vars
+                min_cost_dict = cost_dict
+                min_layer_time = layer_time
+                min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
                 min_layer_df = layer_df
 
         if pool is not None:
             pool.close()
             pool.join()
 
-        return min_layer_df, min_cost_dict, min_layer_time, min_cstr, min_layer_vars
+        return min_layer_df, min_cstr, min_cost_dict, min_layer_time, min_layer_vars, \
+                min_accesses_result, min_noc_hops
 
     def gen_segments(self):
         segments = defaultdict(list)
@@ -900,12 +947,15 @@ class KaplaSearcher:
 
 def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_parted_workload, part, buf_sharing,
                                 resource, constraint, array_mapping, unit_nhops, unit_cost, options):
+    opt_value = float('inf')
     min_layer_df = None
     min_layer_vars = None
     min_cost_dict = None
     min_total_cost = float('inf')
     min_layer_time = float('inf')
     min_cstr = None
+    min_noc_hops = None
+    min_accesses_result = None
 
     if array_mapping == ame.ROW_STATIONARY:
         tdm = RSTensorDimMap()
@@ -1103,6 +1153,7 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
                 node_hops = [fwd_hop + bufshr_hop for fwd_hop, bufshr_hop in
                              zip(fwd_hops, buf_shr_hops)]
                 mem_hops = [unh * f for unh, f in zip(unit_nhops, g_rd_iters)]
+                noc_hops = [nnh + mnh for nnh, mnh in zip(node_hops, mem_hops)]
 
                 # calculate the cost
                 cost_dict = dict()
@@ -1172,7 +1223,8 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
                 sorted_regf_updates = sort_update(regf_updates, bl_ords[BL.REGF],
                                                   origin_regf_update)
                 sorted_gbuf_updates = sort_update(gbuf_updates, bl_ords[BL.GBUF])
-                if total_cost < min_total_cost:
+                if options.opt_goal == 'e' and (total_cost < opt_value):
+                    opt_value = total_cost
                     logic_region = mapping.logic_region
                     mapping_fold = mapping.fold
                     mapping_repls = mapping.repls.copy()
@@ -1186,9 +1238,46 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
                     min_layer_time = layer_time
                     min_cost_dict = cost_dict
                     min_cstr = real_cstr
+                    min_noc_hops = noc_hops
+                    min_accesses_result = accesses_result
+                elif options.opt_goal == 'd' and (sum(layer_time) < opt_value):
+                    opt_value = sum(layer_time)
+                    logic_region = mapping.logic_region
+                    mapping_fold = mapping.fold
+                    mapping_repls = mapping.repls.copy()
+                    min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part,
+                                      conv_strds, loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords,
+                                      unit_ops, resource, buf_sharing, unit_nhops, g_logical_dim, g_buf_sharings, gbuf_unit_accesses, g_rd_iters, g_upd_dims, g_iter_times, bl_ords[BL.GBUF], accesses_result)
+                    min_layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack,
+                                                   sorted_gbuf_updates, regf_tensor_dims,
+                                                   regf_stack, sorted_regf_updates, buf_sharing)
+                    min_total_cost = total_cost
+                    min_layer_time = layer_time
+                    min_cost_dict = cost_dict
+                    min_cstr = real_cstr
+                    min_noc_hops = noc_hops
+                    min_accesses_result = accesses_result
+                elif options.opt_goal == 'ed' and (total_cost * sum(layer_time) < opt_value):
+                    opt_value = total_cost * sum(layer_time)
+                    logic_region = mapping.logic_region
+                    mapping_fold = mapping.fold
+                    mapping_repls = mapping.repls.copy()
+                    min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part,
+                                      conv_strds, loopcnt, unit_size, knobs_tuple, bl_ts, bl_ords,
+                                      unit_ops, resource, buf_sharing, unit_nhops, g_logical_dim, g_buf_sharings, gbuf_unit_accesses, g_rd_iters, g_upd_dims, g_iter_times, bl_ords[BL.GBUF], accesses_result)
+                    min_layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack,
+                                                   sorted_gbuf_updates, regf_tensor_dims,
+                                                   regf_stack, sorted_regf_updates, buf_sharing)
+                    min_total_cost = total_cost
+                    min_layer_time = layer_time
+                    min_cost_dict = cost_dict
+                    min_cstr = real_cstr
+                    min_noc_hops = noc_hops
+                    min_accesses_result = accesses_result
                 bl_ord_counter += 1
 
-    return min_layer_df, min_cost_dict, min_layer_time, min_cstr, min_layer_vars
+    return min_layer_df, min_cost_dict, min_layer_time, min_cstr, min_noc_hops, \
+            min_accesses_result, min_layer_vars
 
 
 def generate_loop_blocking(loopcnt, constraint):

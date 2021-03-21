@@ -4,6 +4,7 @@ import math
 import itertools
 import fastcache
 import heapq
+import random
 
 from nn_dataflow.core import data_category_enum as de
 from nn_dataflow.core import loop_enum as le
@@ -25,8 +26,8 @@ Fast explorer for a quick schedule on nn dataflow.
 '''
 
 
-def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, options, explore_n_seg_sets=4,
-                    nprocesses=8):
+def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, options,
+                    explore_n_seg_sets=4, part_esti_ratio=0.3, nprocesses=8):
     """
     Generate a set of best segments that are preferred to schedule.
     """
@@ -58,7 +59,8 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
     handler_list = []
 
     for idx, segment in enumerate(ordered_segments):
-        r = apply_func(estimate_seg_cost, (segment, network, options, array_mapping, cost))
+        r = apply_func(estimate_seg_cost, (segment, network, options, array_mapping,
+                                           part_esti_ratio, cost))
         handler_list.append(r)
 
     seg_cost_list = list(map(retrieve_func, handler_list))
@@ -69,7 +71,6 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
 
 
     print('Start DP -----------------')
-    print('ordered_segments:', [seg.seg for seg in ordered_segments])
     for idx, segment in enumerate(ordered_segments):
         print('cand:', segment)
         # Solve the constraint with least buffer occupation.
@@ -87,10 +88,8 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
 
         # Update dp tracker.
         last_layer = segment.seg[-1][-1]
-        opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[0][:num_top_segs]
+        opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[:num_top_segs]
         print('last_layer: ', last_layer, opt_segments[last_layer])
-
-    raise ValueError("Interrupt as intended.")
 
     seg_set = set()
     for cost_seg in opt_segments[ordered_layer_list[-1]]:
@@ -112,7 +111,7 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
     return new_segments
 
 
-def estimate_seg_cost(segment, network, options, array_mapping, cost):
+def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio, cost):
     """
     Estimate the cost of the segment.
     """
@@ -127,12 +126,14 @@ def estimate_seg_cost(segment, network, options, array_mapping, cost):
             layer = network[layer_name]
             # Use the minimum cost among different partition schemes as the
             # corresponding layer's cost.
+            p_list = list(p for p in partition.gen_partition(layer, batch_size,
+                    rsrc.proc_region.dim, options, guaranteed=True))
+            estimate_num = math.ceil(part_esti_ratio * len(p_list))
+            p_list = random.sample(p_list, estimate_num)
             min_part_cost = min(
                 estimate_layer_cost(
                     layer, batch_size, p, rsrc, cstr, cost, array_mapping, options)
-                for p in partition.gen_partition(
-                    layer, batch_size, rsrc.proc_region.dim, options,
-                    guaranteed=True))
+                for p in p_list)
             if min_part_cost == float('inf'):
                 return float('inf')
             min_cost += min_part_cost
@@ -362,7 +363,7 @@ def estimate_layer_cost(layer, batch_size, part, resource, constraint, cost, arr
                                   / resource.dram_bandwidth))
         layer_cost = max(proc_time, bus_time, dram_time)
     else:
-        layer_cost = sum(ac[mhe] * cost.mem_hier_at(mhe)
+        layer_cost = sum(sum(ac[mhe]) * cost.mem_hier_at(mhe)
                         for mhe in range(me.NUM)) + sum(mh) * cost.noc_hop
 
     return layer_cost
@@ -378,32 +379,32 @@ def _estimate_layer_accesses(layer, batch_size, part, resource, constraint,
     else:
         bufshr_size = tuple([1] * de.NUM)
 
-    layer_acc = [0] * me.NUM
+    layer_acc = [[0] * de.NUM] * me.NUM
 
     # DRAM access.
     if resource.src_data_region.type == NodeRegion.DRAM:
         acc = p_layer.total_ifmap_size(p_batch) * \
                 part.size() // bufshr_size[de.IFM]
-        layer_acc[me.DRAM] += acc
+        layer_acc[me.DRAM][de.IFM] = acc
     if resource.dst_data_region.type == NodeRegion.DRAM:
         acc = p_layer.total_ofmap_size(p_batch) * \
                 part.size() // bufshr_size[de.OFM]
-        layer_acc[me.DRAM] += acc
+        layer_acc[me.DRAM][de.OFM] = acc
     try:
         acc = p_layer.total_filter_size() * \
                 part.size() // bufshr_size[de.FIL]
         if not _filter_is_fully_buffered(p_layer, p_batch, constraint,
                                          bufshr_size, resource.size_gbuf):
             acc *= constraint.topbat
-        layer_acc[me.DRAM] += acc
+        layer_acc[me.DRAM][de.FIL] = acc
     except AttributeError:
         pass
 
     # GBUF access.
-    layer_acc[me.GBUF] += p_layer.total_ifmap_size(p_batch) * part.size()
-    layer_acc[me.GBUF] += p_layer.total_ofmap_size(p_batch) * part.size()
+    layer_acc[me.GBUF][de.IFM] = p_layer.total_ifmap_size(p_batch) * part.size()
+    layer_acc[me.GBUF][de.OFM] = p_layer.total_ofmap_size(p_batch) * part.size()
     try:
-        layer_acc[me.GBUF] += p_layer.total_filter_size() * part.size()
+        layer_acc[me.GBUF][de.FIL] = p_layer.total_filter_size() * part.size()
     except AttributeError:
         pass
 

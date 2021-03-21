@@ -1,5 +1,6 @@
 import itertools, copy, functools, sys, pprint, math, time, argparse
 
+from multiprocessing import Pool
 from collections import defaultdict, OrderedDict
 
 import nn_dataflow.core.loop_enum as le
@@ -16,8 +17,12 @@ from nn_dataflow.nns import import_network
 
 from nn_dataflow.array_mapping_templates.tensor_dim_map import LayerTypeEnum as lte
 from nn_dataflow.array_mapping_templates.tensor_dim_map import ArrayMappingEnum as ame
+from nn_dataflow.array_mapping_templates.tensor_dim_map import SearchMethodEnum as sme
 
 from nn_dataflow.solver.fast_explorer import gen_segment_set, segment_occp_is_valid
+
+from nn_dataflow.searcher.kapla_searcher import KaplaSearcher
+
 from nn_dataflow.array_mapping_templates.row_stationary import RowStationary
 from nn_dataflow.array_mapping_templates.systolic import Systolic
 from nn_dataflow.array_mapping_templates.tensor_dim_map import RSTensorDimMap, SystolicTensorDimMap
@@ -54,8 +59,12 @@ class KaplaSolver:
         self.cost_model = KaplaCostModel(self.tdm)
 
         print('start solve segment')
-        self.selected_segments = self.solve_segment(explore_n_seg_sets=4)
+        self.selected_segments = self.solve_segment(part_esti_ratio=0.3, explore_n_seg_sets=4)
         print('finish solve segment')
+
+        # Initialize a Kapla searcher for backward search.
+        self.searcher = KaplaSearcher(sme.KAPLA_SEARCHER, network, array_mapping, batch_size,
+                                      resource, unit_cost, options, ntops)
 
     def solve_dataflow(self):
         df_tops = defaultdict(lambda: None)
@@ -124,7 +133,7 @@ class KaplaSolver:
                 elif self.options.opt_goal == 'ed':
                     top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*x[-3])[0]
                 else:
-                    raise ValueError(f'Kapla solver: Invalid opt goal {self.options.opt_goal}')
+                    raise ValueError('Kapla solver: Invalid opt goal {}'.format(self.options.opt_goal))
 
                 nndf_result = nn_rearrange(top_seg_df, prev_df)
                 nndf_list.append(nndf_result)
@@ -142,7 +151,7 @@ class KaplaSolver:
             elif self.options.opt_goal == 'ed':
                 df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1]*x[-3])[0]
             else:
-                raise ValueError(f'Kapla solver: Invalid opt goal {self.options.opt_goal}')
+                raise ValueError('Kapla solver: Invalid opt goal {}'.format(self.options.opt_goal))
 
             df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
             nndf_tops[layer_name] = df_tops[layer_name][3]
@@ -150,7 +159,7 @@ class KaplaSolver:
 
         return df_tops[self.ordered_layer_list[-1]]
 
-    def solve_segment(self, explore_n_seg_sets=4):
+    def solve_segment(self, part_esti_ratio=0.3, explore_n_seg_sets=4):
         segments = defaultdict(list)
         for seg in self.ilp.gen_segment(self.options):
             if seg not in segments[seg[-1][-1]]:
@@ -158,6 +167,7 @@ class KaplaSolver:
         selected_segments = gen_segment_set(segments, self.ordered_layer_list, self.network,
                                             self.unit_cost, self.array_mapping, self.options,
                                             explore_n_seg_sets=explore_n_seg_sets,
+                                            part_esti_ratio=part_esti_ratio,
                                             nprocesses=self.options.nprocesses)
         # selected_segments = segments
         return selected_segments
@@ -219,11 +229,17 @@ class KaplaSolver:
                                         sp_idx, tm_idx)
 
                 if df is None:
-                    return dict(), None, None, None, None
-
-                # Convert Kapla's representation to NN Dataflow representation for cost evaluation.
-                sched_result = self.derive_sched_result(seg_idx, sp_idx, tm_idx, resource,
-                                                        ifmap_layout, sched_vars)
+                    # # Try to fallback to the exhaustive searcher.
+                    df, real_cstr, cost_dict, layer_time, sched_vars, accesses_result, noc_hops = \
+                        self.searcher.search_layer_df(layer_name, cur_cstr, resource, ifmap_layout)
+                    if df is None:
+                        return dict(), None, None, None, None
+                    sched_result = self.searcher.derive_sched_result(layer_name, seg_idx, sp_idx,
+                        tm_idx, ifmap_layout, sched_vars[:-9])
+                else:
+                    # Convert Kapla's representation to NN Dataflow representation for cost evaluation.
+                    sched_result = self.derive_sched_result(seg_idx, sp_idx, tm_idx, resource,
+                                                            ifmap_layout, sched_vars)
                 cur_nndf[layer_name] = sched_result
                 seg_df[layer_name]["dataflow"] = df
                 seg_df[layer_name]["sched_seq"] = [seg_idx, sp_idx, tm_idx]
@@ -286,6 +302,7 @@ class KaplaSolver:
             is_valid, top_bl_ts, remain_lcnt = self.cstr_check_prune(layer_type, cstr, loopcnt,
                                                                      bl_ords, resource)
             if not is_valid:
+                # print('{}: check_prune invalid: {}, {}'.format(layer_name, bl_ords, loopcnt))
                 continue
 
             regf_unit_tensor = copy.deepcopy(origin_regf_unit_tensor)
@@ -336,6 +353,7 @@ class KaplaSolver:
                                       frozenset(gbuf_unit_tensor.items()),
                                       tuple(bl_ords[BL.REGF]))
             if froz_remain_lcnt is None:
+                # print('{}: fill_regf_tensor invalid {}, {}, {}'.format(layer_name, remain_lcnt, regf_unit_tensor, gbuf_unit_tensor))
                 continue
 
             remain_lcnt = dict(froz_remain_lcnt)
@@ -358,6 +376,7 @@ class KaplaSolver:
             if util.prod(gbuf_repls) != 1 and \
                     ((min_cost < float("inf")) or
                      (layer_type not in (lte.LOCAL, lte.LOCAL_BACK_H))):
+                # print('{}: fill_gbuf_tensor invalid {}, {}, {}'.format(layer_name, remain_lcnt, regf_unit_tensor, gbuf_unit_tensor))
                 continue
 
             # If no buffer sharing, it's the same as regf level.
@@ -381,6 +400,8 @@ class KaplaSolver:
                                           frozenset(gbuf_unit_tensor.items()),
                                           tuple(bl_ords[BL.GBUF]), tuple(shr_node_num))
             if froz_remain_lcnt is None:
+                # print('{}: fill_gbuf_tensor invalid {}, {}, {}'.format(layer_name, remain_lcnt,
+                    #   regf_unit_tensor, gbuf_unit_tensor))
                 continue
             remain_lcnt = dict(froz_remain_lcnt)
             gbuf_unit_tensor = dict(froz_gbuf_unit_tensor)
@@ -392,18 +413,21 @@ class KaplaSolver:
             # reduced to 1, otherwise the constraint cannot be met.
             if top_bl_ts[le.BAT] > 0:
                 if remain_lcnt["N"] != 1:
+                    # print('{} constraint check invalid {}'.format(layer_name, remain_lcnt))
                     continue
             else:
                 top_bl_ts[le.BAT] = remain_lcnt["N"]
 
             if top_bl_ts[le.IFM] > 0:
                 if remain_lcnt["C"] != 1:
+                    # print('{} constraint check invalid {}'.format(layer_name, remain_lcnt))
                     continue
             else:
                 top_bl_ts[le.IFM] = remain_lcnt["C"]
 
             if top_bl_ts[le.OFM] > 0:
                 if remain_lcnt["K"] != 1:
+                    # print('{} constraint check invalid {}'.format(layer_name, remain_lcnt))
                     continue
             else:
                 top_bl_ts[le.OFM] = remain_lcnt["K"]
@@ -414,9 +438,11 @@ class KaplaSolver:
                 assert dst_is_dram, "KaplaSolver: ConvBackWeightLayer should be written to dram!"
             if not src_is_dram and bl_ords[BL.GBUF][le.BAT] < bl_ords[BL.GBUF][le.OFM] and \
                     top_bl_ts[le.OFM] > 1:
+                # print('{} src_is_dram invalid: {} {}'.format(layer_name, bl_ords, top_bl_ts))
                 continue
             if not dst_is_dram and bl_ords[BL.GBUF][le.BAT] < bl_ords[BL.GBUF][le.IFM] and \
                     top_bl_ts[le.IFM] > 1:
+                # print('{} dst_is_dram invalid: {} {}'.format(layer_name, bl_ords, top_bl_ts))
                 continue
 
             gbuf_iter_dict = self.get_gbuf_iter(layer_type, top_bl_ts, remain_lcnt)
@@ -490,8 +516,8 @@ class KaplaSolver:
                 min_sched_var = (layer_type, layer, gbuf_stacks, mapping, conv_strds,
                                  regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
                                  gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
-            elif self.options.opt_goal == 'd' and (layer_time < opt_value):
-                opt_value = layer_time
+            elif self.options.opt_goal == 'd' and (sum(layer_time) < opt_value):
+                opt_value = sum(layer_time)
                 min_cost = total_cost
                 min_layer_time = layer_time
                 min_cost_dict = cost_dict
@@ -503,8 +529,8 @@ class KaplaSolver:
                 min_sched_var = (layer_type, layer, gbuf_stacks, mapping, conv_strds,
                                  regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
                                  gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
-            elif self.options.opt_goal == 'ed' and ((total_cost * layer_time) < opt_value):
-                opt_value = total_cost * layer_time
+            elif self.options.opt_goal == 'ed' and ((total_cost * sum(layer_time)) < opt_value):
+                opt_value = total_cost * sum(layer_time)
                 min_cost = total_cost
                 min_layer_time = layer_time
                 min_cost_dict = cost_dict
@@ -518,6 +544,116 @@ class KaplaSolver:
                                  gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
 
         return layer_cand, min_cstr, min_cost_dict, min_layer_time, min_sched_var, min_accesses_result, min_noc_hops
+
+    def search_layer_df(self, layer_name, cstr, resource, ifmap_layout):
+        opt_value = float('inf')
+        min_cost = float("inf")
+        min_cost_dict = dict()
+        min_layer_time = float("inf")
+        min_cstr = None
+        min_noc_hops = None
+        min_accesses_result = None
+        min_layer_df = None
+        min_layer_vars = None
+
+        layer = self.network[layer_name]
+        layer_type = ident_layer_type(layer)
+        conv_strds = get_conv_strds(layer_type, layer)
+
+        results = []
+
+        def retrieve_result():
+            ''' Retrieve results from multiprocessing.Pool. '''
+            for r in results:
+                yield r.get(timeout=3600)
+
+        def retrieve_result_st():
+            ''' Retrieve results from single-process processing. '''
+            for r in results:
+                yield r
+
+        if self.options.nprocesses > 1:
+            pool = Pool(processes=self.options.nprocesses)
+            apply_func = pool.apply_async
+            retrieve_func = retrieve_result
+        else:
+            pool = None
+            apply_func = util.apply
+            retrieve_func = retrieve_result_st
+
+        for part in partition.gen_partition(layer, self.batch_size, resource.proc_region.dim,
+                                                   self.options, guaranteed=True):
+            parted_workload = part_workload(self.array_mapping, part, layer, self.batch_size)
+            if self.options.hw_gbuf_sharing:
+                buf_sharing = BufShrScheme(resource.proc_region, part, layer.data_loops())
+            else:
+                buf_sharing = None
+
+            # Filter nodes. All memory nodes can store filters. Deduplicate.
+            filter_nodes = frozenset(resource.dram_region.iter_node())
+            # Ofmap layout.
+            ofmap_range = FmapRange(FmapPosition(b=0, n=0, h=0, w=0),
+                                    FmapPosition(b=self.batch_size, n=layer.nofm, h=layer.hofm,
+                                                 w=layer.wofm))
+            ofmap_data_region = resource.dst_data_region
+            ofmap_layout = DataLayout(frngs=(ofmap_range,), regions=(ofmap_data_region,),
+                                      parts=(part.projection(ofmap_data_region, appl2frng=True),))
+            # Partition NoC hop cost.
+            unit_nhops = \
+                partition.unit_nhops_to_proc_region(layer, self.batch_size, resource.proc_region,
+                                                    part, filter_nodes, ifmap_layout, ofmap_layout,
+                                                    self.options)
+
+            r = apply_func(_search_layer_df_perprocess,
+                           (sme.KAPLA_SEARCHER, layer_type, conv_strds,
+                            frozenset(parted_workload.items()), part,
+                            buf_sharing, resource, cstr, self.array_mapping, unit_nhops,
+                            self.unit_cost, self.options))
+            results.append(r)
+
+        for (layer_df, cost_dict, layer_time, real_cstr, noc_hops, accesses_result,
+             layer_vars) in retrieve_func():
+            if layer_df is None:
+                continue
+
+            if self.options.opt_goal == 'e' and (cost_dict.values() < opt_value):
+                min_cost = cost_dict.values()
+                opt_value = min_cost
+                min_layer_vars = layer_vars
+                min_cost_dict = cost_dict
+                min_layer_time = layer_time
+                min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
+                min_layer_df = layer_df
+            elif self.options.opt_goal == 'd' and (layer_time < opt_value):
+                opt_value = layer_time
+                min_cost = cost_dict.values()
+                opt_value = min_cost
+                min_layer_vars = layer_vars
+                min_cost_dict = cost_dict
+                min_layer_time = layer_time
+                min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
+            elif self.options.opt_goal == 'ed' and ((cost_dict.values() * layer_time) < opt_value):
+                opt_value = cost_dict.values() * layer_time
+                min_cost = cost_dict.values()
+                opt_value = min_cost
+                min_layer_vars = layer_vars
+                min_cost_dict = cost_dict
+                min_layer_time = layer_time
+                min_cstr = real_cstr
+                min_noc_hops = noc_hops
+                min_accesses_result = accesses_result
+
+        if pool is not None:
+            pool.close()
+            pool.join()
+
+        return min_layer_df, min_cstr, min_cost_dict, min_layer_time, min_layer_vars, \
+                min_accesses_result, min_noc_hops
+
 
     def cstr_check_prune(self, layer_type, constraint, loopcnt, bl_ords, resource):
         is_valid = True
