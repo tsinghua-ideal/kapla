@@ -889,7 +889,6 @@ class MapStrategySystolic(MapStrategy):
 
         super(MapStrategySystolic, self).__init__(layer, batch_size, occupancy,
                                              dim_array, reverse_mapping)
-        print(layer)
 
         if reverse_mapping:
             raise ValueError("MapSystolic: Not support back-prop layer!")
@@ -903,6 +902,11 @@ class MapStrategySystolic(MapStrategy):
             cnt_lpeset = self.batch_size * self.layer.nifm
         elif isinstance(self.layer, LocalRegionLayer):
             self.ops_lpe = self.layer.nreg * self.layer.wreg * self.layer.hreg
+            self.dim_lpeset = PhyDim2(self.layer.hofm*self.layer.wofm,
+                                      self.layer.nofm)
+            cnt_lpeset = self.batch_size
+        elif isinstance(self.layer, DepthwiseConvolutionLayer):
+            self.ops_lpe = self.layer.wfil * self.layer.hfil
             self.dim_lpeset = PhyDim2(self.layer.hofm*self.layer.wofm,
                                       self.layer.nofm)
             cnt_lpeset = self.batch_size
@@ -1006,7 +1010,7 @@ class MapStrategySystolic(MapStrategy):
             util.assert_float_eq_int(
                 nld.total_access_at_of(me.DRAM, de.FIL),
                 self.layer.total_filter_size()
-                if isinstance(self.layer, ConvLayer) else 0,
+                if isinstance(self.layer, (ConvLayer, DepthwiseConvolutionLayer)) else 0,
                 'MapSystolic: total access at DRAM for FIL {} is incorrect.'
                 .format(nld.total_access_at_of(me.DRAM, de.FIL)))
             util.assert_float_eq_int(
@@ -1023,7 +1027,7 @@ class MapStrategySystolic(MapStrategy):
             util.assert_float_eq_int(
                 nld.unit_access_at_of(me.REGF, de.FIL) * util.prod(nld.loopcnt),
                 self.layer.total_ops(self.batch_size) * self.occupancy
-                if isinstance(self.layer, ConvLayer) else 0,
+                if isinstance(self.layer, (ConvLayer, DepthwiseConvolutionLayer)) else 0,
                 'MapSystolic: unit access at REGF for FIL {} is incorrect.'
                 .format(nld.unit_access_at_of(me.REGF)))
             util.assert_float_eq_int(
@@ -1052,7 +1056,6 @@ class MapStrategySystolic(MapStrategy):
 
         if self.dim_lpeset.h > self.dim_array.h:
             # Fold on height.
-            print(self.dim_lpeset.h, self.dim_array.h)
             fold_h = util.idivc(self.dim_lpeset.h, self.dim_array.h)
         else:
             # Replicate on height.
@@ -1098,7 +1101,6 @@ class MapStrategySystolic(MapStrategy):
         sz_regf = [float('nan')] * de.NUM
 
         if isinstance(self.layer, ConvLayer):
-
             # adjust fold_h
             fold_hofm = util.closest_factor(self.fold.h, factor=self.fold.h/2)[0]
             fold_wofm = self.fold.h / fold_hofm
@@ -1147,9 +1149,7 @@ class MapStrategySystolic(MapStrategy):
             sz_regf[de.IFM] = 1
             sz_regf[de.OFM] = 1
 
-        else:
-            assert isinstance(self.layer, LocalRegionLayer)
-
+        elif isinstance(self.layer, LocalRegionLayer):
             # adjust fold_h
             fold_hofm = util.closest_factor(self.fold.h, factor=self.fold.h/2)[0]
             fold_wofm = self.fold.h / fold_hofm
@@ -1191,6 +1191,42 @@ class MapStrategySystolic(MapStrategy):
             sz_regf[de.FIL] = 0
             sz_regf[de.IFM] = acclayer.nreg
             sz_regf[de.OFM] = 1
+
+        elif isinstance(self.layer, DepthwiseConvolutionLayer):
+            fold_hofm = util.closest_factor(self.fold.h, factor=self.fold.h/2)[0]
+            fold_wofm = self.fold.h / fold_hofm
+            acclayer = DepthwiseConvolutionLayer(
+                1. * self.layer.nofm / self.fold.w,
+                (1. * self.layer.hofm / fold_hofm, 1. * self.layer.wofm / fold_wofm),
+                (self.layer.hfil, self.layer.wfil),
+                strd=(self.layer.htrd, self.layer.wtrd))
+            
+            ops = acclayer.total_ops()
+            
+            time = self.ops_lpe
+
+            access[me.DRAM][de.FIL] = acclayer.total_filter_size()
+            access[me.DRAM][de.IFM] = acclayer.total_ifmap_size()
+            access[me.DRAM][de.OFM] = acclayer.total_ofmap_size()
+
+            access[me.GBUF][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.GBUF][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.GBUF][de.OFM] = access[me.DRAM][de.OFM]
+
+            access[me.ITCN][de.FIL] = access[me.DRAM][de.FIL]
+            access[me.ITCN][de.IFM] = access[me.DRAM][de.IFM]
+            access[me.ITCN][de.OFM] = access[me.DRAM][de.OFM]
+
+            access[me.REGF] = [ops] * de.NUM
+
+            sz_gbuf[de.FIL] = acclayer.total_filter_size()
+            sz_gbuf[de.IFM] = acclayer.total_ifmap_size()
+            sz_gbuf[de.OFM] = acclayer.total_ofmap_size()
+
+            sz_regf[de.FIL] = 1
+            sz_regf[de.IFM] = 1
+            sz_regf[de.OFM] = 1
+
 
         # All utilized PEs run `time` to execute replicated `ops`
         assert util.isclose(time * self.dim_array.size() * self.util,
@@ -1244,8 +1280,7 @@ class MapStrategySystolic(MapStrategy):
 
             yield tuple(lcnt), locc, repl_size, repl_cnt
 
-        else:
-            assert isinstance(self.layer, LocalRegionLayer)
+        elif isinstance(self.layer, LocalRegionLayer):
             for t_repl_h, t_repl_w in itertools.product(
                     util.factorize(self.repl.h, 2),
                     util.factorize(self.repl.w, 2)):
@@ -1271,6 +1306,36 @@ class MapStrategySystolic(MapStrategy):
                 # Replicated data counts.
                 repl_cnt = [0] * de.NUM
                 repl_cnt[de.FIL] = 0
+                repl_cnt[de.IFM] = ofmaps * batches
+                repl_cnt[de.OFM] = ofmaps * batches
+
+                yield tuple(lcnt), locc, repl_size, repl_cnt
+        elif isinstance(self.layer, DepthwiseConvolutionLayer):
+            for t_repl_h, t_repl_w in itertools.product(
+                    util.factorize(self.repl.h, 2),
+                    util.factorize(self.repl.w, 2)):
+                batches = t_repl_h[0] * t_repl_w[0]
+                ofmaps =  t_repl_h[1] * t_repl_w[1]
+
+                batches = min(batches, self.batch_size)
+                ofmaps = min(ofmaps, self.layer.nofm)
+                repl_size = batches * ofmaps
+
+                # Loop trip counts.
+                lcnt = [float('nan')] * le.NUM
+                lcnt[le.IFM] = 1
+                lcnt[le.OFM] = util.idivc(self.fold.w, ofmaps)
+                lcnt[le.BAT] = util.idivc(self.batch_size, batches) * \
+                               self.fold.h
+
+                # Loop occupancy.
+                locc = [1.] * le.NUM
+                locc[le.OFM] = 1. * self.fold.w / ofmaps / lcnt[le.OFM]
+                locc[le.BAT] = 1. * self.batch_size * self.fold.h / batches / lcnt[le.BAT]
+
+                # Replicated data counts.
+                repl_cnt = [0] * de.NUM
+                repl_cnt[de.FIL] = ofmaps
                 repl_cnt[de.IFM] = ofmaps * batches
                 repl_cnt[de.OFM] = ofmaps * batches
 

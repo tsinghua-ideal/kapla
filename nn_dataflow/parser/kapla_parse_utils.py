@@ -295,7 +295,7 @@ def part_workload(array_mapping, part, layer, batch_size):
         else:
             raise TypeError("Unsupported layer type: {}".format(type(layer)))
     elif array_mapping == ame.SYSTOLIC:
-        if isinstance(layer, (ConvLayer, LocalRegionLayer)):
+        if isinstance(layer, (ConvLayer, LocalRegionLayer, DepthwiseConvolutionLayer)):
             layer_tensor["N"] = util.idivc(batch_size, pdims[pe.BATP].size())
             layer_tensor["K"] = util.idivc(layer.nofm, pdims[pe.OUTP].size())
             layer_tensor["XY"] = util.idivc(layer.wofm * layer.hofm, pdims[pe.OFMP].size())
@@ -304,6 +304,9 @@ def part_workload(array_mapping, part, layer, batch_size):
                 layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.INPP].size())
             elif isinstance(layer, LocalRegionLayer):
                 layer_tensor["F"] = max(layer.hreg, layer.htrd) * max(layer.wreg, layer.wtrd)
+                layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
+            elif isinstance(layer, DepthwiseConvolutionLayer):
+                layer_tensor["F"] = max(layer.hfil, layer.htrd) * max(layer.wfil, layer.wtrd)
                 layer_tensor["C"] = util.idivc(layer.nifm, pdims[pe.OUTP].size())
         else:
             raise TypeError("Unsupported layer type: {}".format(type(layer)))

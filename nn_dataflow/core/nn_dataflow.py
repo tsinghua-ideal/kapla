@@ -200,7 +200,6 @@ class NNDataflow():
             # if any(all(h >= fh for h, fh in zip(hints, fhints))
             #        for fhints in frontier):
             #     continue
-
             # Start from the previous top schemes.
             curr_nndf_tops = prev_nndf_tops
 

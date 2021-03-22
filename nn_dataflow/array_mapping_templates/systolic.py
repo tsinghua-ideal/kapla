@@ -14,7 +14,7 @@ class Systolic(object):
         self.physic_region = resource.dim_array
         self.physic_node_dim = resource.proc_region.dim
         self.conv_strds = conv_strds
-        if layer_type in (0, 1):
+        if layer_type in (lte.CONV, lte.LOCAL, lte.DW_CONV):
             self.logic_region = PhyDim2(workload["XY"], workload["K"])
         else:
             raise TypeError("Unsupported layer type: {}".format(layer_type))

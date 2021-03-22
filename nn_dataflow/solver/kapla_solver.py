@@ -436,12 +436,12 @@ class KaplaSolver:
             dst_is_dram = (resource.dst_data_region.type == NodeRegion.DRAM)
             if layer_type == lte.CONV_BACK_W:
                 assert dst_is_dram, "KaplaSolver: ConvBackWeightLayer should be written to dram!"
-            if not src_is_dram and bl_ords[BL.GBUF][le.BAT] < bl_ords[BL.GBUF][le.OFM] and \
-                    top_bl_ts[le.OFM] > 1:
+            if not src_is_dram and min(bl_ords[BL.GBUF][le.BAT], bl_ords[BL.GBUF][le.IFM]) < \
+                    bl_ords[BL.GBUF][le.OFM] and top_bl_ts[le.OFM] > 1:
                 # print('{} src_is_dram invalid: {} {}'.format(layer_name, bl_ords, top_bl_ts))
                 continue
-            if not dst_is_dram and bl_ords[BL.GBUF][le.BAT] < bl_ords[BL.GBUF][le.IFM] and \
-                    top_bl_ts[le.IFM] > 1:
+            if not dst_is_dram and min(bl_ords[BL.GBUF][le.BAT], bl_ords[BL.GBUF][le.OFM]) < \
+                    bl_ords[BL.GBUF][le.IFM] and top_bl_ts[le.IFM] > 1:
                 # print('{} dst_is_dram invalid: {} {}'.format(layer_name, bl_ords, top_bl_ts))
                 continue
 
@@ -544,116 +544,6 @@ class KaplaSolver:
                                  gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
 
         return layer_cand, min_cstr, min_cost_dict, min_layer_time, min_sched_var, min_accesses_result, min_noc_hops
-
-    def search_layer_df(self, layer_name, cstr, resource, ifmap_layout):
-        opt_value = float('inf')
-        min_cost = float("inf")
-        min_cost_dict = dict()
-        min_layer_time = float("inf")
-        min_cstr = None
-        min_noc_hops = None
-        min_accesses_result = None
-        min_layer_df = None
-        min_layer_vars = None
-
-        layer = self.network[layer_name]
-        layer_type = ident_layer_type(layer)
-        conv_strds = get_conv_strds(layer_type, layer)
-
-        results = []
-
-        def retrieve_result():
-            ''' Retrieve results from multiprocessing.Pool. '''
-            for r in results:
-                yield r.get(timeout=3600)
-
-        def retrieve_result_st():
-            ''' Retrieve results from single-process processing. '''
-            for r in results:
-                yield r
-
-        if self.options.nprocesses > 1:
-            pool = Pool(processes=self.options.nprocesses)
-            apply_func = pool.apply_async
-            retrieve_func = retrieve_result
-        else:
-            pool = None
-            apply_func = util.apply
-            retrieve_func = retrieve_result_st
-
-        for part in partition.gen_partition(layer, self.batch_size, resource.proc_region.dim,
-                                                   self.options, guaranteed=True):
-            parted_workload = part_workload(self.array_mapping, part, layer, self.batch_size)
-            if self.options.hw_gbuf_sharing:
-                buf_sharing = BufShrScheme(resource.proc_region, part, layer.data_loops())
-            else:
-                buf_sharing = None
-
-            # Filter nodes. All memory nodes can store filters. Deduplicate.
-            filter_nodes = frozenset(resource.dram_region.iter_node())
-            # Ofmap layout.
-            ofmap_range = FmapRange(FmapPosition(b=0, n=0, h=0, w=0),
-                                    FmapPosition(b=self.batch_size, n=layer.nofm, h=layer.hofm,
-                                                 w=layer.wofm))
-            ofmap_data_region = resource.dst_data_region
-            ofmap_layout = DataLayout(frngs=(ofmap_range,), regions=(ofmap_data_region,),
-                                      parts=(part.projection(ofmap_data_region, appl2frng=True),))
-            # Partition NoC hop cost.
-            unit_nhops = \
-                partition.unit_nhops_to_proc_region(layer, self.batch_size, resource.proc_region,
-                                                    part, filter_nodes, ifmap_layout, ofmap_layout,
-                                                    self.options)
-
-            r = apply_func(_search_layer_df_perprocess,
-                           (sme.KAPLA_SEARCHER, layer_type, conv_strds,
-                            frozenset(parted_workload.items()), part,
-                            buf_sharing, resource, cstr, self.array_mapping, unit_nhops,
-                            self.unit_cost, self.options))
-            results.append(r)
-
-        for (layer_df, cost_dict, layer_time, real_cstr, noc_hops, accesses_result,
-             layer_vars) in retrieve_func():
-            if layer_df is None:
-                continue
-
-            if self.options.opt_goal == 'e' and (cost_dict.values() < opt_value):
-                min_cost = cost_dict.values()
-                opt_value = min_cost
-                min_layer_vars = layer_vars
-                min_cost_dict = cost_dict
-                min_layer_time = layer_time
-                min_cstr = real_cstr
-                min_noc_hops = noc_hops
-                min_accesses_result = accesses_result
-                min_layer_df = layer_df
-            elif self.options.opt_goal == 'd' and (layer_time < opt_value):
-                opt_value = layer_time
-                min_cost = cost_dict.values()
-                opt_value = min_cost
-                min_layer_vars = layer_vars
-                min_cost_dict = cost_dict
-                min_layer_time = layer_time
-                min_cstr = real_cstr
-                min_noc_hops = noc_hops
-                min_accesses_result = accesses_result
-            elif self.options.opt_goal == 'ed' and ((cost_dict.values() * layer_time) < opt_value):
-                opt_value = cost_dict.values() * layer_time
-                min_cost = cost_dict.values()
-                opt_value = min_cost
-                min_layer_vars = layer_vars
-                min_cost_dict = cost_dict
-                min_layer_time = layer_time
-                min_cstr = real_cstr
-                min_noc_hops = noc_hops
-                min_accesses_result = accesses_result
-
-        if pool is not None:
-            pool.close()
-            pool.join()
-
-        return min_layer_df, min_cstr, min_cost_dict, min_layer_time, min_layer_vars, \
-                min_accesses_result, min_noc_hops
-
 
     def cstr_check_prune(self, layer_type, constraint, loopcnt, bl_ords, resource):
         is_valid = True
@@ -1883,6 +1773,9 @@ class KaplaSolver:
                     (fold_x, fold_y),
                     (layer.hfil, layer.wfil),
                     strd=(conv_strds[1], conv_strds[0]))
+                amp_acc_ifm = 1. * acclayer.hifm * acclayer.wifm * fold_h / \
+                              layer.hifm / layer.wifm
+                unit_time = layer.wfil * layer.hfil
             else:
                 raise TypeError("Unsupported layer type {}".format(layer_type))
 

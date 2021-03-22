@@ -139,7 +139,8 @@ def _gen_loopblocking_perprocess(
             lbs = LoopBlockingScheme(
                 nested_loop_desc, bl_ts, bl_ords, resource, bufshr,
                 options)
-            yield lbs
+            if lbs.is_valid():
+                yield lbs
 
     return heapq.nsmallest(options.ntops, _sweep(),
                            key=_loop_blocking_cmp_key(options, cost))
@@ -175,13 +176,15 @@ def gen_loopblocking(nested_loop_desc, resource, part, constraint, cost,
         ''' Retrieve results from multiprocessing.Pool. '''
         for r in results:
             for t in r.get(timeout=3600):
-                yield t
+                if t.is_valid():
+                    yield t
 
     def retrieve_result_st():
         ''' Retrieve results from single-process processing. '''
         for r in results:
             for t in r:
-                yield t
+                if t.is_valid():
+                    yield t
 
     if options.nprocesses > 1:
         pool = Pool(processes=options.nprocesses)

@@ -206,7 +206,6 @@ class Scheduling():
                 part, resource, condition.constraint, options))
             if not lbs_tops:
                 continue
-
             # Ofmap layout.
             ofmap_range = FmapRange(
                 FmapPosition(b=0, n=0, h=0, w=0),
