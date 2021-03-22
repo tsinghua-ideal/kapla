@@ -116,24 +116,21 @@ def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
     Estimate the cost of the segment.
     """
     batch_size = segment.batch_size
-    def _estimate_per_cstr_cost(constraint):
+    def _estimate_per_cstr_cost(constraint, p_list):
         """ Estimate the cost of the segment under a given constraint. """
         min_cost = 0
-        for layer_name, rsrc, cstr in zip(
+        for layer_name, rsrc, cstr, parts in zip(
                 itertools.chain(*segment.seg),
                 itertools.chain(*segment.allocation()),
-                itertools.chain(*constraint)):
+                itertools.chain(*constraint),
+                p_list):
             layer = network[layer_name]
             # Use the minimum cost among different partition schemes as the
             # corresponding layer's cost.
-            p_list = list(p for p in partition.gen_partition(layer, batch_size,
-                    rsrc.proc_region.dim, options, guaranteed=True))
-            estimate_num = math.ceil(part_esti_ratio * len(p_list))
-            p_list = random.sample(p_list, estimate_num)
             min_part_cost = min(
                 estimate_layer_cost(
                     layer, batch_size, p, rsrc, cstr, cost, array_mapping, options)
-                for p in p_list)
+                for p in parts)
             if min_part_cost == float('inf'):
                 return float('inf')
             min_cost += min_part_cost
@@ -143,15 +140,25 @@ def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
     # Sequentially search constraints.
     # As we check topifm/ofm/bat satisfiability during the cost calculation, we cannot assume a
     # single point dividing invalid/valid constraints. So advanced search methods cannot use.
+    p_list = []
+    for layer_name, rsrc in zip(
+            itertools.chain(*segment.seg),
+            itertools.chain(*segment.allocation())):
+        layer = network[layer_name]
+        ps = list(p for p in partition.gen_partition(layer, batch_size, rsrc.proc_region.dim,
+                options, guaranteed=True))
+        estimate_num = math.ceil(part_esti_ratio * len(ps))
+        p_list.append(random.sample(ps, estimate_num))
+
     min_cost = float('inf')
     for cstr, _ in segment.gen_constraint():
         if cstr[0][0].topbat != 0 and not segment_occp_is_valid(segment.seg, segment.network,
                                                                 segment.batch_size, cstr,
                                                                 segment.alloc):
             continue
-        min_cost = _estimate_per_cstr_cost(cstr)
-        if min_cost < float('inf'):
-            break
+        cur_cost = _estimate_per_cstr_cost(cstr, p_list)
+        if cur_cost < min_cost:
+            min_cost = cur_cost
 
     print('estimate_seg_cost', segment.seg, 'min_cost', min_cost, flush=True)
 
