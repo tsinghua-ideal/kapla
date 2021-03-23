@@ -130,9 +130,9 @@ class KaplaSearcher:
                 if self.options.opt_goal == 'e':
                     top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
                 elif self.options.opt_goal == 'd':
-                    top_seg_df = sorted(seg_dfs, key=lambda x: sum(x[-3]))[0]
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-2].total_time)[0]
                 elif self.options.opt_goal == 'ed':
-                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*sum(x[-3]))[0]
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*x[-2].total_time)[0]
                 else:
                     raise ValueError('Kapla searcher: Invalid opt goal {}'.format(self.options.opt_goal))
                 nndf_result = nn_rearrange(top_seg_df, prev_df)

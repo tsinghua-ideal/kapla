@@ -133,6 +133,13 @@ def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
                 for p in parts)
             if min_part_cost == float('inf'):
                 return float('inf')
+            # costs = tuple(estimate_layer_cost(layer, batch_size, p, rsrc, cstr, cost,
+            #               array_mapping, options) for p in parts)
+            # costs = [cost for cost in costs if cost < float('inf')]
+            # if len(costs) == 0:
+            #     return float('inf')
+            # else:
+            #     min_part_cost = sum(costs) / len(costs)
             min_cost += min_part_cost
 
         return min_cost

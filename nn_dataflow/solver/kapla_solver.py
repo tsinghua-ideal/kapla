@@ -110,13 +110,14 @@ class KaplaSolver:
                     # Filter out off-frontier constraints.
                     if any(all(h >= fh for h, fh in zip(hints, fhints)) for fhints in frontier):
                         continue
-                    print("-- constraint: {}".format(constraint))
+                    print("-- constraint: {}".format(constraint), flush=True)
                     cur_nndf = prev_nndf.copy()
                     seg_df, cost_dict, seg_time, cur_nndf, total_cost = \
                         self.solve_segment_df(seg, allocation, constraint, cur_nndf)
                     print(seg_df)
                     print(cost_dict)
                     print(total_cost)
+                    print(seg_time)
                     print("")
                     if len(seg_df) == 0:
                         continue
@@ -129,9 +130,9 @@ class KaplaSolver:
                 if self.options.opt_goal == 'e':
                     top_seg_df = sorted(seg_dfs, key=lambda x: x[-1])[0]
                 elif self.options.opt_goal == 'd':
-                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-3])[0]
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-2].total_time)[0]
                 elif self.options.opt_goal == 'ed':
-                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*x[-3])[0]
+                    top_seg_df = sorted(seg_dfs, key=lambda x: x[-1]*x[-2].total_time)[0]
                 else:
                     raise ValueError('Kapla solver: Invalid opt goal {}'.format(self.options.opt_goal))
 
@@ -153,7 +154,6 @@ class KaplaSolver:
             else:
                 raise ValueError('Kapla solver: Invalid opt goal {}'.format(self.options.opt_goal))
 
-            df_tops[layer_name] = sorted(nndf_list, key=lambda x: x[-1])[0]
             nndf_tops[layer_name] = df_tops[layer_name][3]
             layer_counter += 1
 
@@ -213,7 +213,7 @@ class KaplaSolver:
                 for prev_layer, _ in cstr.update_dict.items():
                     topofm = cstr_collections[prev_layer].topofm
                 cur_cstr = SimpleCstr(topbat, topifm, topofm)
-                print("layer_name: {}".format(layer_name))
+                print("layer_name: {}".format(layer_name), flush=True)
                 ifmap_layout = cur_nndf.fmap_layout(self.network.prevs(layer_name))
                 fwd_data_region = fwd_data_region_dict.get((sp_idx, tm_idx))
                 if fwd_data_region is not None:
@@ -249,12 +249,12 @@ class KaplaSolver:
                 seg_times[sp_idx].append(layer_time)
                 total_cost += sum(cost_dict.values())
 
-                print("total_cost: {}".format(sum(cost_dict.values())))
-                print(accesses_result)
-                print(noc_hops)
-                print(cost_dict)
-                print(sched_vars)
-                print(sched_result)
+                print("total_cost: {}".format(sum(cost_dict.values())), flush=True)
+                print(accesses_result, flush=True)
+                print(noc_hops, flush=True)
+                print(cost_dict, flush=True)
+                print(sched_vars, flush=True)
+                print(sched_result, flush=True)
 
         # Estimate the segment's total time.
         seg_total_time = self.cost_model.seg_time_estimation(self.network, segment, seg_times,

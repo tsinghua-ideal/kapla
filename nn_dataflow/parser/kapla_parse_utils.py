@@ -224,7 +224,7 @@ def nn_rearrange(seg_df, prev_nndf):
     else:
         _df = OrderedDict()
         _cd = OrderedDict()
-        prev_df, prev_cost, prev_total_time, prev_nndf, prev_total_cost = prev_nndf
+        prev_df, prev_cost, prev_total_time, prev_nndf_desc, prev_total_cost = prev_nndf
         total_cost = prev_total_cost + cur_total_cost
         total_time = prev_total_time + max(cur_seg_time)
         _cd.update(prev_cost)

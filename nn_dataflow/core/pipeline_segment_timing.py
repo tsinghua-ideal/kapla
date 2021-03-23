@@ -18,7 +18,8 @@ from collections import namedtuple, OrderedDict
 
 from . import loop_enum as le
 from .loop_blocking_scheme import LoopBlockingScheme
-from .layer import ConvLayer
+from .layer import ConvLayer, ConvBackActLayer, ConvBackWeightLayer, DepthwiseConvolutionLayer, \
+    DepthwiseConvolutionBackActLayer, DepthwiseConvolutionBackWeightLayer
 from .network import Network
 
 class PipelineSegmentTiming():
@@ -193,7 +194,10 @@ class PipelineSegmentTiming():
 
         # Calculate timing.
         sp_idx, tm_idx = self.layer2idx[layer_name]
-        is_conv = isinstance(self.network[layer_name], ConvLayer)
+        is_conv = isinstance(self.network[layer_name],
+                             (ConvLayer, ConvBackActLayer, ConvBackWeightLayer,
+                              DepthwiseConvolutionLayer, DepthwiseConvolutionBackActLayer,
+                              DepthwiseConvolutionBackWeightLayer))
         time = sched_result.total_time
         ts_xb = 0
         td_xb = 0
