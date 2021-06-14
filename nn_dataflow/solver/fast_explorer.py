@@ -27,7 +27,8 @@ Fast explorer for a quick schedule on nn dataflow.
 
 
 def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, options,
-                    explore_n_seg_sets=4, part_esti_ratio=0.3, nprocesses=8):
+                    explore_n_seg_sets=8, part_esti_ratio=1.0, part_esti_abs_max_num=32,
+                    nprocesses=8):
     """
     Generate a set of best segments that are preferred to schedule.
     """
@@ -60,7 +61,7 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
 
     for idx, segment in enumerate(ordered_segments):
         r = apply_func(estimate_seg_cost, (segment, network, options, array_mapping,
-                                           part_esti_ratio, cost))
+                                           part_esti_ratio, part_esti_abs_max_num, cost))
         handler_list.append(r)
 
     seg_cost_list = list(map(retrieve_func, handler_list))
@@ -70,9 +71,9 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
         pool.join()
 
 
-    print('Start DP -----------------')
+    # print('Start DP -----------------')
     for idx, segment in enumerate(ordered_segments):
-        print('cand:', segment)
+        # print('cand:', segment, flush=True)
         # Solve the constraint with least buffer occupation.
         min_cost = seg_cost_list[idx]
 
@@ -89,7 +90,7 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
         # Update dp tracker.
         last_layer = segment.seg[-1][-1]
         opt_segments[last_layer] = sorted(opt_segments[last_layer] + cur_cands)[:num_top_segs]
-        print('last_layer: ', last_layer, opt_segments[last_layer])
+        # print('last_layer: ', last_layer, opt_segments[last_layer], flush=True)
 
     seg_set = set()
     for cost_seg in opt_segments[ordered_layer_list[-1]]:
@@ -111,7 +112,8 @@ def gen_segment_set(segments, ordered_layer_list, network, cost, array_mapping, 
     return new_segments
 
 
-def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio, cost):
+def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
+                      part_esti_abs_max_num, cost):
     """
     Estimate the cost of the segment.
     """
@@ -154,11 +156,12 @@ def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
         layer = network[layer_name]
         ps = list(p for p in partition.gen_partition(layer, batch_size, rsrc.proc_region.dim,
                 options, guaranteed=True))
-        estimate_num = math.ceil(part_esti_ratio * len(ps))
+        estimate_num = min(math.ceil(part_esti_ratio * len(ps)), part_esti_abs_max_num)
         p_list.append(random.sample(ps, estimate_num))
 
     min_cost = float('inf')
     for cstr, _ in segment.gen_constraint():
+        # print('Constraint: {}'.format(cstr), flush=True)
         if cstr[0][0].topbat != 0 and not segment_occp_is_valid(segment.seg, segment.network,
                                                                 segment.batch_size, cstr,
                                                                 segment.alloc):
@@ -166,6 +169,7 @@ def estimate_seg_cost(segment, network, options, array_mapping, part_esti_ratio,
         cur_cost = _estimate_per_cstr_cost(cstr, p_list)
         if cur_cost < min_cost:
             min_cost = cur_cost
+            break
 
     print('estimate_seg_cost', segment.seg, 'min_cost', min_cost, flush=True)
 
@@ -186,6 +190,7 @@ def segment_occp_is_valid(seg_tuple, network, batch_size, constraint,
             layer_occp = _estimate_layer_occp(layer, batch_size, rsrc, cstr)
 
             if layer_occp > rsrc.proc_region.dim.size() * rsrc.size_gbuf:
+                # print('Invalid segment_occp: {} {} {}'.format(layer_occp, rsrc.proc_region.dim.size(), rsrc.size_gbuf))
                 return False
 
     return True

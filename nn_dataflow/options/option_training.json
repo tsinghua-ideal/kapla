@@ -16,7 +16,7 @@
         "layer_pipeline_time_ovhd": 1e10,
         "layer_pipeline_max_degree": 1e10,
         "layer_pipeline_opt": true,
-        "opt_goal": "d",
+        "opt_goal": "e",
         "ntops": 1,
         "nprocesses": 8,
         "verbose": true

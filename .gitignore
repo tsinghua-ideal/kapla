@@ -13,9 +13,14 @@ settings.json
 # Log related.
 *.log
 *.profile
+*.json
+*.pdf
 
+# Experiment related.
 bp_collection/
 systolic_collection/
 row_stationary_collection/
 nndf_collect/
 profiling_script.py
+hardware_explorer/hw_explr/
+hardware_explorer/design_explr_pickle/

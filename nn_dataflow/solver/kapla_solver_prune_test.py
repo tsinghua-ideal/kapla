@@ -48,6 +48,8 @@ class KaplaSolver:
         self.ntops = ntops
         self.ilp = InterLayerPipeline(network, batch_size, resource)
         self.ordered_layer_list = self.ilp.ordered_layer_list()
+        print('***Report {}'.format(self.network))
+
         self.initial_layout_idx = 0
         if array_mapping == ame.ROW_STATIONARY:
             self.tdm = RSTensorDimMap()
@@ -117,20 +119,24 @@ class KaplaSolver:
                     if any(all(h >= fh for h, fh in zip(hints, fhints)) for fhints in frontier):
                         continue
                     print("-- constraint: {}".format(constraint), flush=True)
+                    constraint_counter += 1
                     cur_nndf = prev_nndf.copy()
                     seg_df, cost_dict, seg_time, cur_nndf, total_cost = \
                         self.solve_segment_df(seg, allocation, constraint, cur_nndf)
-                    print(seg_df)
-                    print(cost_dict)
-                    print(total_cost)
-                    print(seg_time)
-                    print("")
+                    # print(seg_df)
+                    # print(cost_dict)
+                    # print(total_cost)
+                    # print(seg_time)
+                    # print("")
                     if len(seg_df) == 0:
                         continue
                     frontier.add(hints)
                     seg_dfs.append((seg_df, cost_dict, seg_time, cur_nndf, total_cost))
-                    print("Prev nndf: {} {}".format(prev_nndf.res_dict.keys(), prev_nndf.total_time))
-                    print("Cur nndf: {} {}".format(cur_nndf.res_dict.keys(), cur_nndf.total_time))
+                    # print("Prev nndf: {} {}".format(prev_nndf.res_dict.keys(), prev_nndf.total_time))
+                    # print("Cur nndf: {} {}".format(cur_nndf.res_dict.keys(), cur_nndf.total_time))
+                print('Origin cstr num: {}'.format(len(tuple(seg.gen_constraint()))))
+                print('Pruned cstr num: {}'.format(constraint_counter))
+
 
                 # Select best seg df.
                 if len(seg_dfs) == 0:
@@ -179,6 +185,8 @@ class KaplaSolver:
                                             part_esti_ratio=part_esti_ratio,
                                             part_esti_abs_max_num=part_esti_abs_max_num,
                                             nprocesses=self.options.nprocesses)
+        print('Origin seg num: {}'.format(sum([len(l) for l in segments.values()])))
+        print('Pruned seg num: {}'.format(sum([len(l) for l in selected_segments.values()])))
         # selected_segments = segments
         return selected_segments
 
@@ -223,7 +231,7 @@ class KaplaSolver:
                 for prev_layer, _ in cstr.update_dict.items():
                     topofm = cstr_collections[prev_layer].topofm
                 cur_cstr = SimpleCstr(topbat, topifm, topofm)
-                print("layer_name: {}".format(layer_name), flush=True)
+                # print("layer_name: {}".format(layer_name), flush=True)
                 ifmap_layout = cur_nndf.fmap_layout(self.network.prevs(layer_name))
                 fwd_data_region = fwd_data_region_dict.get((sp_idx, tm_idx))
                 if fwd_data_region is not None:
@@ -250,7 +258,6 @@ class KaplaSolver:
                     # Convert Kapla's representation to NN Dataflow representation for cost evaluation.
                     sched_result = self.derive_sched_result(seg_idx, sp_idx, tm_idx, resource,
                                                             ifmap_layout, sched_vars)
-
                 cur_nndf[layer_name] = sched_result
                 seg_df[layer_name]["dataflow"] = df
                 seg_df[layer_name]["sched_seq"] = [seg_idx, sp_idx, tm_idx]
@@ -260,12 +267,12 @@ class KaplaSolver:
                 seg_times[sp_idx].append(layer_time)
                 total_cost += sum(cost_dict.values())
 
-                print("total_cost: {}".format(sum(cost_dict.values())), flush=True)
-                print(accesses_result, flush=True)
-                print(noc_hops, flush=True)
-                print(cost_dict, flush=True)
-                print(sched_vars, flush=True)
-                print(sched_result, flush=True)
+                # print("total_cost: {}".format(sum(cost_dict.values())), flush=True)
+                # print(accesses_result, flush=True)
+                # print(noc_hops, flush=True)
+                # print(cost_dict, flush=True)
+                # print(sched_vars, flush=True)
+                # print(sched_result, flush=True)
 
         # Estimate the segment's total time.
         seg_total_time = self.cost_model.seg_time_estimation(self.network, segment, seg_times,
@@ -555,13 +562,13 @@ class KaplaSolver:
                                  regf_stack_repl_dict, gbuf_stack_repl_dict, regf_tensor_repl_dict,
                                  gbuf_tensor_repl_dict, gbuf_iter_dict, bl_ords, unit_ops)
 
-            print('min_cost', min_cost)
-            print('min_layer_time', min_layer_time)
-            print('min_cost_dict', min_cost_dict)
-            print('min_cstr', min_cstr)
-            print('min_accesses_result', min_accesses_result)
-            print('min_noc_hops', min_noc_hops)
-            print('min_sched_var', min_sched_var)
+            # print('min_cost', min_cost)
+            # print('min_layer_time', min_layer_time)
+            # print('min_cost_dict', min_cost_dict)
+            # print('min_cstr', min_cstr)
+            # print('min_accesses_result', min_accesses_result)
+            # print('min_noc_hops', min_noc_hops)
+            # print('min_sched_var', min_sched_var)
 
         return layer_cand, min_cstr, min_cost_dict, min_layer_time, min_sched_var, min_accesses_result, min_noc_hops
 

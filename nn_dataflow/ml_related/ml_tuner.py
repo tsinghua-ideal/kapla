@@ -175,11 +175,24 @@ class XGBTuner(object):
 
             # keep best config
             for k, (config, result) in enumerate(zip(configs, results)):
-                if result[0] is None:
-                    total_cost = 100
+                if self.options.opt_goal == 'e':
+                    if result[0] is None:
+                        total_cost = 100
+                    else:
+                        total_cost = sum(result[1].values())
+                elif self.options.opt_goal == 'd':
+                    if result[0] is None:
+                        total_cost = 10**6
+                    else:
+                        total_cost = max(result[2])
+                elif self.options.opt_goal == 'ed':
+                    if result[0] is None:
+                        total_cost = 10**8
+                    else:
+                        total_cost = sum(result[1].values()) * max(result[2])
                 else:
-                    cost_dict = result[1]
-                    total_cost = sum(cost_dict.values())
+                    raise ValueError('ML Tuner: Invalid opt goal {}'.format(self.options.opt_goal))
+
                 costs.append(total_cost)
                 if total_cost < self.best_cost:
                     self.best_config = config
@@ -382,7 +395,16 @@ def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workloa
     mapping_repls = dict(froz_mapping_repls)
 
     min_layer_df = None
-    min_total_cost = 100
+    # if options.opt_goal == 'e':
+    #     min_total_cost = 100
+    # elif options.opt_goal == 'd':
+    #     min_total_cost = 10**7
+    # elif options.opt_goal == 'ed':
+    #     min_total_cost = 10**9
+    # else:
+    #     raise ValueError('ML Tuner: Invalid opt goal {}'.format(options.opt_goal))
+    min_total_cost = float('inf')
+
     min_cost_dict = dict()
     min_layer_time = float("inf")
     min_layer_vars = None
@@ -562,7 +584,6 @@ def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workloa
         cost_dict["noc_hop_cost"] = sum(node_hops) * unit_cost.noc_hop
         cost_dict["mem_hop_cost"] = sum(mem_hops) * unit_cost.noc_hop
         cost_dict["op_cost"] = nndf_ops * unit_cost.mac_op
-        total_cost = sum(cost_dict.values())
 
         sorted_regf_updates = sort_update(regf_updates, bl_ords[BL.REGF], origin_regf_update)
         sorted_gbuf_updates = sort_update(gbuf_updates, bl_ords[BL.GBUF])
@@ -580,7 +601,23 @@ def _get_layer_df_preprocess(array_mapping, layer_type, conv_strds, gbuf_workloa
         layer_df = layer_rearrange(tdm, gbuf_tensor_dims, gbuf_stack, sorted_gbuf_updates,
                                    regf_tensor_dims, regf_stack, sorted_regf_updates, buf_sharing)
 
-        if total_cost < min_total_cost:
+        if options.opt_goal == 'e' and (sum(cost_dict.values()) < min_total_cost):
+            min_total_cost = sum(cost_dict.values())
+            min_layer_df = layer_df
+            min_cost_dict = cost_dict
+            min_layer_time = layer_time
+            min_real_cstr = real_cstr
+            min_layer_vars = layer_vars
+        elif options.opt_goal == 'd' and (max(layer_time) < min_total_cost):
+            min_total_cost = max(layer_time)
+            min_layer_df = layer_df
+            min_cost_dict = cost_dict
+            min_layer_time = layer_time
+            min_real_cstr = real_cstr
+            min_layer_vars = layer_vars
+        elif options.opt_goal == 'ed' and (sum(cost_dict.values()) * max(layer_time) <
+                                                min_total_cost):
+            min_total_cost = sum(cost_dict.values()) * max(layer_time)
             min_layer_df = layer_df
             min_cost_dict = cost_dict
             min_layer_time = layer_time
@@ -620,28 +657,48 @@ def generate_loop_blocking(array_mapping, layer_type, loopcnt, constraint):
 
     for bl_ts in itertools.product(*knobs.values()):
         bl_ts = tuple(zip(*bl_ts))
-        # Construct the real constraint.
-        if "N" in knobs_tuple:
-            topbat = bl_ts[0][knobs_tuple.index("N")]
-        else:
+        if array_mapping == ame.ROW_STATIONARY:
+            # Construct the real constraint.
             topbat = 1
-        if "C" in knobs_tuple:
-            topifm = bl_ts[0][knobs_tuple.index("C")]
-        else:
             topifm = 1
-        if "K" in knobs_tuple:
-            topofm = bl_ts[0][knobs_tuple.index("K")]
-        else:
             topofm = 1
-        real_cstr = SimpleCstr(topbat, topifm, topofm)
+            if "N" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("N")]
+            if "C" in knobs_tuple:
+                topifm *= bl_ts[0][knobs_tuple.index("C")]
+            if "K" in knobs_tuple:
+                topofm *= bl_ts[0][knobs_tuple.index("K")]
 
-        # for bl_ords in itertools.product(*[itertools.permutations(range(len(knobs))) for _ in range(BL.NUM)]):
-        if constraint.topbat and ("N" in knobs_tuple) and (constraint.topbat != topbat):
-            continue
-        if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
-            continue
-        if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
-            continue
+            real_cstr = SimpleCstr(topbat, topifm, topofm)
+
+            if constraint.topbat and ("N" in knobs_tuple) and (constraint.topbat != topbat):
+                continue
+            if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
+                continue
+            if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
+                continue
+
+        elif array_mapping == ame.SYSTOLIC:
+            topbat = 1
+            topifm = 1
+            topofm = 1
+            if "N" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("N")]
+            if "XY" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("XY")]
+            if "C" in knobs_tuple:
+                topifm *= bl_ts[0][knobs_tuple.index("C")]
+            if "K" in knobs_tuple:
+                topofm *= bl_ts[0][knobs_tuple.index("K")]
+
+            real_cstr = SimpleCstr(topbat, topifm, topofm)
+
+            if constraint.topbat and ("N" in knobs_tuple or "XY" in knobs_tuple) and (constraint.topbat != topbat):
+                continue
+            if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
+                continue
+            if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
+                continue
 
 
         yield knobs_tuple, bl_ts, real_cstr

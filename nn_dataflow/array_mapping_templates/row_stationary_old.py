@@ -19,7 +19,7 @@ class RowStationary(object):
         elif layer_type in (lte.CONV_BACK_H, lte.CONV_BACK_W, lte.LOCAL_BACK_H, lte.DW_CONV_H,
                             lte.DW_CONV_W):
             self.logic_region = PhyDim2(workload["S"], workload["Yi"])
-        # self.repl_fold()
+        self.repl_fold()
         self.repls = dict()
 
     def repl_fold(self):
@@ -37,20 +37,19 @@ class RowStationary(object):
         else:
             repl_w = self.physic_region.w // self.logic_region.w
 
-        self.fold = PhyDim2(fold_h, fold_w)
-        self.repl = PhyDim2(repl_h, repl_w)
+        f_w2h = min(repl_h, fold_w)
+        fold_w = util.idivc(fold_w, f_w2h)
+        repl_h = repl_h // f_w2h
 
-    def unfold_on_repl(self):
-        f_w2h = min(self.repl.h, self.fold.w)
-        fold_w = util.idivc(self.fold.w, f_w2h)
-        repl_h = self.repl.h // f_w2h
-
-        f_h2w = min(self.repl.w, self.fold.h)
-        fold_h = util.idivc(self.fold.h, f_h2w)
-        repl_w = self.repl.w // f_h2w
+        f_h2w = min(repl_w, fold_h)
+        fold_h = util.idivc(fold_h, f_h2w)
+        repl_w = repl_w // f_h2w
 
         self.fold = PhyDim2(fold_h, fold_w)
         self.repl = PhyDim2(repl_h, repl_w)
+
+        self.logic_region = PhyDim2(util.idivc(self.logic_region.h, self.fold.h),
+                                    util.idivc(self.logic_region.w, self.fold.w))
 
     def gen_unitpass(self):
         min_cnt_loops = float("inf")
@@ -250,12 +249,6 @@ class RowStationary(object):
             raise ValueError("Invalid layer type: {}".format(self.layer_type))
 
     def gen_array_mapping(self):
-        self.repl_fold()
-        self.unfold_on_repl()
-
-        self.logic_region = PhyDim2(util.idivc(self.logic_region.h, self.fold.h),
-                                    util.idivc(self.logic_region.w, self.fold.w))
-
         for gbuf_unit_tensor, regf_unit_tensor, lcnt, locc in self.gen_unitpass():
             usize = [None] * BL.NUM
             usize[BL.REGF] = regf_unit_tensor
@@ -268,7 +261,7 @@ class RowStationary(object):
                 regf_stacks.append(("S", 1, "Yi", 1, self.logic_region.h))
                 for dim, repl in self.repls.items():
                     if repl > 1:
-                        regf_stacks.append((dim, 1, repl))
+                        regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates
@@ -298,7 +291,7 @@ class RowStationary(object):
                         if dim == "K":
                             regf_stacks.append(("C", repl * self.conv_strds[2], "K", repl))
                         else:
-                            regf_stacks.append((dim, 1, repl))
+                            regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates
@@ -336,7 +329,7 @@ class RowStationary(object):
                 regf_stacks.append(("S", 1, "Yo", 1, self.logic_region.h))
                 for dim, repl in self.repls.items():
                     if repl > 1:
-                        regf_stacks.append((dim, 1, repl))
+                        regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates
@@ -365,7 +358,7 @@ class RowStationary(object):
                         if dim == "C":
                             regf_stacks.append(("C", repl, "K", repl * self.conv_strds[2]))
                         else:
-                            regf_stacks.append((dim, 1, repl))
+                            regf_stacks.append((dim, repl))
                 regf_stacks = tuple(regf_stacks)
 
                 # construct unitpass updates
@@ -397,10 +390,7 @@ class RowStationary(object):
                 raise ValueError("Invalid layer type: {}".format(self.layer_type))
 
     def get_unit_block(self):
-        self.repl_fold()
         regf_repls = [self.repl.w, self.repl.h]
-        self.logic_region = PhyDim2(util.idivc(self.logic_region.h, self.fold.h),
-                                    util.idivc(self.logic_region.w, self.fold.w))
         if self.layer_type == lte.CONV:
             elapsed_width = self.logic_region.w * util.idivc(self.workload["Yo"], self.logic_region.w)
             if elapsed_width // self.logic_region.w > 1 and \

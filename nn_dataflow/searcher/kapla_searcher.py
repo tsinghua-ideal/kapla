@@ -333,7 +333,6 @@ class KaplaSearcher:
             elif self.options.opt_goal == 'd' and (sum(layer_time) < opt_value):
                 opt_value = sum(layer_time)
                 min_cost = sum(cost_dict.values())
-                opt_value = min_cost
                 min_layer_vars = layer_vars
                 min_cost_dict = cost_dict
                 min_layer_time = layer_time
@@ -344,7 +343,6 @@ class KaplaSearcher:
             elif self.options.opt_goal == 'ed' and ((sum(cost_dict.values()) * sum(layer_time)) < opt_value):
                 opt_value = sum(cost_dict.values()) * sum(layer_time)
                 min_cost = sum(cost_dict.values())
-                opt_value = min_cost
                 min_layer_vars = layer_vars
                 min_cost_dict = cost_dict
                 min_layer_time = layer_time
@@ -804,6 +802,9 @@ class KaplaSearcher:
             real_resource = resource._replace(size_gbuf=resource.size_gbuf / 0.99,
                                               size_regf=resource.size_regf / 0.99)
 
+            print('###DEBUG###')
+            print('comp_bl_ts: {}'.format(comp_bl_ts))
+            print('comp_bl_ords: {}'.format(comp_bl_ords))
             lbs = LoopBlockingScheme(nld, comp_bl_ts, comp_bl_ords, real_resource, bufshr,
                                      self.options)
             if not lbs.is_valid():
@@ -980,7 +981,7 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
         regf_stack_num = logic_region[0] * logic_region[1] * util.prod(regf_repls.values())
 
         bl_ts_prob = 0.1
-        lb_handle = generate_loop_blocking(loopcnt, constraint)
+        lb_handle = generate_loop_blocking(array_mapping, loopcnt, constraint)
         if search_method == sme.RANDOM_SEARCHER:
             lb_handle = util.random_collect(lb_handle, bl_ts_prob)
         for knobs_tuple, bl_ts, real_cstr in lb_handle:
@@ -1242,7 +1243,6 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
                     min_accesses_result = accesses_result
                 elif options.opt_goal == 'd' and (sum(layer_time) < opt_value):
                     opt_value = sum(layer_time)
-                    logic_region = mapping.logic_region
                     mapping_fold = mapping.fold
                     mapping_repls = mapping.repls.copy()
                     min_layer_vars = (layer_type, logic_region, mapping_fold, mapping_repls, part,
@@ -1280,7 +1280,7 @@ def _search_layer_df_perprocess(search_method, layer_type, conv_strds, froz_part
             min_accesses_result, min_layer_vars
 
 
-def generate_loop_blocking(loopcnt, constraint):
+def generate_loop_blocking(array_mapping, loopcnt, constraint):
     knobs = OrderedDict()
     for dim, count in loopcnt.items():
         if count > 1:
@@ -1295,27 +1295,48 @@ def generate_loop_blocking(loopcnt, constraint):
 
     for bl_ts in itertools.product(*knobs.values()):
         bl_ts = tuple(zip(*bl_ts))
-        # Construct the real constraint.
-        if "N" in knobs_tuple:
-            topbat = bl_ts[0][knobs_tuple.index("N")]
-        else:
+        if array_mapping == ame.ROW_STATIONARY:
+            # Construct the real constraint.
             topbat = 1
-        if "C" in knobs_tuple:
-            topifm = bl_ts[0][knobs_tuple.index("C")]
-        else:
             topifm = 1
-        if "K" in knobs_tuple:
-            topofm = bl_ts[0][knobs_tuple.index("K")]
-        else:
             topofm = 1
-        real_cstr = SimpleCstr(topbat, topifm, topofm)
+            if "N" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("N")]
+            if "C" in knobs_tuple:
+                topifm *= bl_ts[0][knobs_tuple.index("C")]
+            if "K" in knobs_tuple:
+                topofm *= bl_ts[0][knobs_tuple.index("K")]
 
-        if constraint.topbat and ("N" in knobs_tuple) and (constraint.topbat != topbat):
-            continue
-        if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
-            continue
-        if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
-            continue
+            real_cstr = SimpleCstr(topbat, topifm, topofm)
+
+            if constraint.topbat and ("N" in knobs_tuple) and (constraint.topbat != topbat):
+                continue
+            if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
+                continue
+            if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
+                continue
+
+        elif array_mapping == ame.SYSTOLIC:
+            topbat = 1
+            topifm = 1
+            topofm = 1
+            if "N" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("N")]
+            if "XY" in knobs_tuple:
+                topbat *= bl_ts[0][knobs_tuple.index("XY")]
+            if "C" in knobs_tuple:
+                topifm *= bl_ts[0][knobs_tuple.index("C")]
+            if "K" in knobs_tuple:
+                topofm *= bl_ts[0][knobs_tuple.index("K")]
+
+            real_cstr = SimpleCstr(topbat, topifm, topofm)
+
+            if constraint.topbat and ("N" in knobs_tuple or "XY" in knobs_tuple) and (constraint.topbat != topbat):
+                continue
+            if constraint.topifm and ("C" in knobs_tuple) and (constraint.topifm != topifm):
+                continue
+            if constraint.topofm and ("K" in knobs_tuple) and (constraint.topofm != topofm):
+                continue
 
         yield knobs_tuple, bl_ts, real_cstr
 

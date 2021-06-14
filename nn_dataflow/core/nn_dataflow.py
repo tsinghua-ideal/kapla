@@ -95,7 +95,9 @@ class NNDataflow():
         for seg in self.ilp.gen_segment(options):
             if seg not in segments[seg[-1][-1]]:
                 segments[seg[-1][-1]].append(seg)
+                print(seg.seg)
 
+        sys.exit(0)
         # Clear and reset.
         self.nndf_tops = {}
 
